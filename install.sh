@@ -1,5 +1,8 @@
-#!/usr/bin/env bash 
+#!/bin/bash
+
 # Создаем юзера
+sudo useradd --no-create-home --shell /usr/sbin/nologin node_exporter
+
 useradd -r -s /bin/false node_exporter
 # Скачиваем, распаковываем
 wget 
