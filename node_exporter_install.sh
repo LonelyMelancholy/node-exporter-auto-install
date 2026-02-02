@@ -1,12 +1,7 @@
 #!/bin/bash
 
-# root checking
-if [[ $EUID -ne 0 ]]; then
-    echo "❌ Error: you are not the root user, exit"
-    exit 1
-else
-    echo "✅ Success: you are root user, continued"
-fi
+# root check
+[[ $EUID -ne 0 ]] && { echo "❌ Error: you are not the root user, exit"; exit 1; }
 
 # check another instanse of the script is not running
 readonly LOCK_FILE="/run/lock/node_exporter_install.lock"
@@ -18,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || { echo "❌ Error: couldn't change working directory, exit"; exit 1; }
 
 source "node_name.cfg"
+
+umask 002
 
 # helper function
 run_and_check() {
@@ -156,8 +153,13 @@ download_and_verify() {
 download_and_verify "$NODE_EXPORTER_URL" "$TMP_DIR/node_exporter.tar.gz" "node_exporter"
 
 # Копируем в директорию к бинарникам
-install -m 755 -o root -g root "$UNPACK_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter"
+mkdir -p /usr/local/bin/node_exporter
 mkdir -p /usr/local/etc/node_exporter/tls
+
+install -m 640 -o root -g node_exporter "ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
+install -m 640 -o root -g node_exporter "${NODE}.crt" "/usr/local/etc/node_exporter/tls/${NODE}.crt"
+install -m 640 -o root -g node_exporter "${NODE}.key" "/usr/local/etc/node_exporter/tls/${NODE}.key"
+install -m 755 -o root -g root "$UNPACK_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter"
 
 # web-config
 tee /usr/local/etc/node_exporter/mtls_auth.yml > /dev/null <<EOF
@@ -189,14 +191,6 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-
-chown -R node_exporter:node_exporter /usr/local/etc/node_exporter/
-chmod 755 -R /usr/local/etc/node_exporter/
-chmod 750 /usr/local/etc/node_exporter/tls/
-
-install -m 640 -o node_exporter -g node_exporter "ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
-install -m 640 -o node_exporter -g node_exporter "${NODE}.crt" "/usr/local/etc/node_exporter/tls/${NODE}.crt"
-install -m 600 -o node_exporter -g node_exporter "${NODE}.key" "/usr/local/etc/node_exporter/tls/${NODE}.key"
 
 # run after generation sert
 systemctl daemon-reload

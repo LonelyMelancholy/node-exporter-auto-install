@@ -3,6 +3,17 @@
 # root checking
 [[ $EUID -ne 0 ]] && { echo "❌ Error: you are not the root user, exit"; exit 1; }
 
+# check another instanse of the script is not running
+readonly LOCK_FILE="/run/lock/cert_install.lock"
+exec 9> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
+flock -n 9 || { echo "❌ Error: another instance is running, exit"; exit 1; }
+
+# changing directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || { echo "❌ Error: couldn't change working directory, exit"; exit 1; }
+
+umask 002
+
 LOCAL="$(hostname).local"
 read -rp "This script need to start on Prometheus node and have NODE_NAME.key privat key for node in /root/.ssh folder, yes if you agree: " AGREE
 
@@ -21,13 +32,14 @@ read -rp "First install? yes or no: " FIRST_INSTALL
 if [[ $FIRST_INSTALL =~ ^([yY]es)$ ]]; then
 
 mkdir -p "/var/log/service"
+mkdir -p /usr/local/etc/telegram
 install -m 600 -g root -o root secrets.env /usr/local/etc/telegram/secrets.env
 
-ssh_key="/root/.ssh/${NODE}.ssh_key"
+ssh_key="/root/.ssh/${NODE}.key"
 
-install -m 755 -g root -o root "cert_update.sh" "/usr/local/bin/cert_update.sh"
+install -m 750 -g root -o root "cert_update.sh" "/usr/local/bin/cert_update.sh"
 
-install -m 644 -g root -o root "cert_update.cfg" "/usr/local/etc/cert_update.cfg"
+install -m 640 -g root -o root "cert_update.cfg" "/usr/local/etc/cert_update.cfg"
 
 tee /etc/systemd/system/node_cert_updater.service > /dev/null <<EOF
 [Unit]
@@ -78,11 +90,12 @@ EOF
 openssl x509 -req -in /etc/prometheus/prometheus_client.crt -CA /etc/prometheus/ca.crt -CAkey /etc/prometheus/ca.key -CAcreateserial \
   -out /etc/prometheus/prometheus_client.crt -days 45 -sha256 -extfile /etc/prometheus/prometheus_client.ext -extensions v3_req
 
-chown -R prometheus:prometheus /etc/prometheus/
-chmod 750 /etc/prometheus/
+chown root:prometheus /etc/prometheus/prometheus_client.crt
 chmod 640 /etc/prometheus/prometheus_client.crt
+chown root:prometheus /etc/prometheus/prometheus_client.key
+chmod 640 /etc/prometheus/prometheus_client.key
+chown root:prometheus /etc/prometheus/ca.crt
 chmod 640 /etc/prometheus/ca.crt
-chmod 600 /etc/prometheus/prometheus_client.key
 chmod 600 /etc/prometheus/ca.key
 fi
 
@@ -122,6 +135,7 @@ else
     ssh -p "${PORT}" -i "$ssh_key" "${NODE_USER}@${NODE}" "cd '${TEMP_DIR}'; sudo -n bash node_exporter_install.sh"
 fi
 
+if ! grep -q "job_name: ${NODE}" /etc/prometheus/prometheus.yml; then
 tee -a /etc/prometheus/prometheus.yml > /dev/null <<EOF
   - job_name: ${NODE}
     scheme: https
@@ -134,8 +148,9 @@ tee -a /etc/prometheus/prometheus.yml > /dev/null <<EOF
       server_name: ${NODE}
       insecure_skip_verify: false
 EOF
+fi
 
-if [[ ${NODE} != localhost ]]; then
+if [[ ${NODE} != localhost ]] && ! grep -q "${NODE}" /etc/hosts; then
     IP_NODE="$(getent hosts "${NODE}")"
     if grep "${NODE}" "/etc/hosts"; then
         echo "${NODE} already in /etc/hosts"
@@ -149,7 +164,7 @@ fi
 
 systemctl restart prometheus.service
 
-if [[ "$NODE" != "localhost" ]]; then
+if [[ "$NODE" != "localhost" ]] && ! grep -q "${NODE}" /usr/local/etc/cert_update.cfg; then
     tee -a /usr/local/etc/cert_update.cfg > /dev/null <<EOF
 ${NODE} ${PORT} ${NODE_USER}
 EOF

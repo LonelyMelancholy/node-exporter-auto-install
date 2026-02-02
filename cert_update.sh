@@ -3,6 +3,15 @@
 # root check
 [[ $EUID -ne 0 ]] && { echo "❌ Error: you are not the root user, exit"; exit 1; }
 
+# check another instanse of the script is not running
+readonly LOCK_FILE="/run/lock/cert_update.lock"
+exec 9> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
+flock -n 9 || { echo "❌ Error: another instance is running, exit"; exit 1; }
+
+# changing directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || { echo "❌ Error: couldn't change working directory, exit"; exit 1; }
+
 # export path just in case
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
@@ -100,7 +109,7 @@ days_left_cert() {
     local crt="$1"
     local end
     [[ ! -f "$crt" ]] && { echo "-1"; return 0; }
-    end=$(openssl x509 -in "$crt" -noout -days_left | cut -d= -f2)
+    end=$(openssl x509 -in "$crt" -noout -enddate 2>/dev/null | cut -d= -f2)
     echo $(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
 }
 
@@ -120,6 +129,15 @@ elif [[ $ROOT_EXPIRED -lt $THRESHOLD_DAYS_ROOT ]]; then
 else
     REPLACE_ALL=0
 fi
+
+while read -r NODE PORT NODE_USER; do
+    # skip empty srting
+    [[ -z "${NODE}" ]] && continue
+    # skip commented string
+    [[ "${NODE:0:1}" == "#" ]] && continue
+    # save string in massive with | as border
+    ALL_TARGETS+=("${NODE}|${PORT}|${NODE_USER}")
+done < "$SERVER_LIST_FILE"
 
 if [[ $REPLACE_ALL == 0 ]]; then
     if [[ $PROMETHEUS_EXPIRED -lt 0 ]]; then
@@ -142,17 +160,6 @@ if [[ $REPLACE_ALL == 0 ]]; then
         REPLACE_LOCALHOST=0
     fi
 
-
-    while read -r NODE PORT NODE_USER; do
-        # skip empty srting
-        [[ -z "${NODE}" ]] && continue
-        # skip commented string
-        [[ "${NODE:0:1}" == "#" ]] && continue
-        # save string in massive with | as border
-        ALL_TARGETS+=("${NODE}|${PORT}|${NODE_USER}")
-    done < "$SERVER_LIST_FILE"
-
-
     for rec in "${ALL_TARGETS[@]}"; do
         IFS='|' read -r NODE PORT NODE_USER <<< "$rec"
 
@@ -166,8 +173,8 @@ if [[ $REPLACE_ALL == 0 ]]; then
         fi
 
         days_left="$(
-            ssh -i "$ssh_key" -p "$PORT" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${NODE_USER}@${NODE}" \
-            "$(days_left_cert) $remote_crt"
+            ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${NODE_USER}@${NODE}" \
+            "sudo -n bash -lc '$(declare -f days_left_cert); days_left_cert $remote_crt'"
         )" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "WARN: ssh/openssl failed for $NODE (skip)" >&2
             continue
@@ -215,14 +222,17 @@ EOF
     # signature prometheus sertificate
     openssl x509 -req -in /etc/prometheus/prometheus_client.crt -CA /etc/prometheus/ca.crt -CAkey /etc/prometheus/ca.key -CAcreateserial \
     -out /etc/prometheus/prometheus_client.crt -days 45 -sha256 -extfile /etc/prometheus/prometheus_client.ext -extensions v3_req
-
+    
+    systemctl restart prometheus.service
+    
     GENERATED_CRT_TARGETS+=("prometheus_client")
 
-    chown -R prometheus:prometheus /etc/prometheus/
-    chmod 750 /etc/prometheus/
+    chown root:prometheus /etc/prometheus/prometheus_client.crt
     chmod 640 /etc/prometheus/prometheus_client.crt
+    chown root:prometheus /etc/prometheus/prometheus_client.key
+    chmod 640 /etc/prometheus/prometheus_client.key
+    chown root:prometheus /etc/prometheus/ca.crt
     chmod 640 /etc/prometheus/ca.crt
-    chmod 600 /etc/prometheus/prometheus_client.key
     chmod 600 /etc/prometheus/ca.key
 fi
 
@@ -263,16 +273,16 @@ if [[ $REPLACE_ALL == 1 ]]; then
             continue
         fi
 
-        TEMP_DIR=$(ssh -o StrictHostKeyChecking=accept-new -p "${PORT}" -o BatchMode=yes -i "$ssh_key" "${NODE_USER}@${NODE}" 'mktemp -d')
+        TEMP_DIR=$(ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" 'mktemp -d')
 
-        scp -P "${PORT}" -o BatchMode=yes -i "$ssh_key" "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" \
+        scp -P "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" \
         "/etc/prometheus/ca.crt" "${NODE_USER}@${NODE}:${TEMP_DIR}" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
-        ssh -p "${PORT}" -i "$ssh_key" "${NODE_USER}@${NODE}" "cd $TEMP_DIR; \
-        sudo -n install -m 640 -o node_exporter -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
-        sudo -n install -m 640 -o node_exporter -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
-        sudo -n install -m 600 -o node_exporter -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
+        ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $TEMP_DIR; \
+        sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
         sudo -n systemctl restart node_exporter.service" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
@@ -280,17 +290,17 @@ if [[ $REPLACE_ALL == 1 ]]; then
 
     done
         generate_sert "localhost"
-        install -m 640 -o node_exporter -g node_exporter "/etc/prometheus/ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
-        install -m 640 -o node_exporter -g node_exporter "/etc/prometheus/localhost.crt" "/usr/local/etc/node_exporter/tls/localhost.crt"
-        install -m 600 -o node_exporter -g node_exporter "/etc/prometheus/localhost.key" "/usr/local/etc/node_exporter/tls/localhost.key"
+        install -m 640 -o root -g node_exporter "/etc/prometheus/ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
+        install -m 640 -o root -g node_exporter "/etc/prometheus/localhost.crt" "/usr/local/etc/node_exporter/tls/localhost.crt"
+        install -m 640 -o root -g node_exporter "/etc/prometheus/localhost.key" "/usr/local/etc/node_exporter/tls/localhost.key"
         systemctl restart node_exporter.service
         GENERATED_CRT_TARGETS+=("localhost")
 else
     if [[ $REPLACE_LOCALHOST == 1 ]]; then
         generate_sert "localhost"
-        install -m 640 -o node_exporter -g node_exporter "/etc/prometheus/ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
-        install -m 640 -o node_exporter -g node_exporter "/etc/prometheus/localhost.crt" "/usr/local/etc/node_exporter/tls/localhost.crt"
-        install -m 600 -o node_exporter -g node_exporter "/etc/prometheus/localhost.key" "/usr/local/etc/node_exporter/tls/localhost.key"
+        install -m 640 -o root -g node_exporter "/etc/prometheus/ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
+        install -m 640 -o root -g node_exporter "/etc/prometheus/localhost.crt" "/usr/local/etc/node_exporter/tls/localhost.crt"
+        install -m 640 -o root -g node_exporter "/etc/prometheus/localhost.key" "/usr/local/etc/node_exporter/tls/localhost.key"
         systemctl restart node_exporter.service
         GENERATED_CRT_TARGETS+=("localhost")
     fi
@@ -307,16 +317,16 @@ else
             echo "WARN: ssh_key not found: $ssh_key for $NODE (skip)" >&2
             continue
         fi
-        TEMP_DIR=$(ssh -o StrictHostKeyChecking=accept-new -p "${PORT}" -o BatchMode=yes -i "$ssh_key" "${NODE_USER}@${NODE}" 'mktemp -d')
+        TEMP_DIR=$(ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" 'mktemp -d')
 
-        scp -P "${PORT}" -o BatchMode=yes -i "$ssh_key" "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" \
+        scp -P "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" \
         "/etc/prometheus/ca.crt" "${NODE_USER}@${NODE}:${TEMP_DIR}" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
-        ssh -p "${PORT}" -i "$ssh_key" "${NODE_USER}@${NODE}" "cd $TEMP_DIR; \
-        sudo -n install -m 640 -o node_exporter -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
-        sudo -n install -m 640 -o node_exporter -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
-        sudo -n install -m 600 -o node_exporter -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
+        ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $TEMP_DIR; \
+        sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
         sudo -n systemctl restart node_exporter.service" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
         GENERATED_CRT_TARGETS+=("${NODE}")
