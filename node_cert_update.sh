@@ -1,99 +1,45 @@
 #!/bin/bash
 
-# root check
-[[ $EUID -ne 0 ]] && { echo "❌ Error: you are not the root user, exit"; exit 1; }
-
-# check another instanse of the script is not running
-readonly LOCK_FILE="/run/lock/cert_update.lock"
-exec 9> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
-flock -n 9 || { echo "❌ Error: another instance is running, exit"; exit 1; }
-
-# changing directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" || { echo "❌ Error: couldn't change working directory, exit"; exit 1; }
-
 # export path just in case
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
-# main variables
-readonly MAX_ATTEMPTS="3"
-
-# enable logging, the directory should already be created, but let's check just in case
-readonly LOG_DIR="/var/log/service"
-readonly UPDATE_LOG="${LOG_DIR}/cert_update.$(date +"%Y-%m-%d").log"
-exec &>> "$UPDATE_LOG" || { echo "❌ Error: cannot write to log '$UPDATE_LOG', exit"; exit 1; }
+# enable logging
+exec > >(systemd-cat -t node_cert_update -p info) 2> >(systemd-cat -t node_cert_update -p err) 5> >(systemd-cat -t node_cert_update -p notice)
 
 # start logging message
-readonly DATE_START="$(date "+%Y-%m-%d %H:%M:%S")"
-echo "########## certificate update upgrade started - $DATE_START ##########"
+echo "########## node certificate update upgrade started - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
+
+# root check
+[[ $EUID -ne 0 ]] && { echo "Error: you are not the root user, exit" >&2; exit 1; }
+
+# changing directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || { echo "Error: couldn't change working directory, exit" >&2; exit 1; }
 
 # exit logging message function
 RC="1"
-on_exit() {
+end_log() {
     if [[ "$RC" -eq "0" ]]; then
-        local date_end="$(date "+%Y-%m-%d %H:%M:%S")"
-        echo "########## certificate update ended - $date_end ##########"
+        echo "########## node certificate update ended - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
     else
-        local date_fail="$(date "+%Y-%m-%d %H:%M:%S")"
-        echo "########## certificate update failed - $date_fail ##########"
+        echo "########## node certificate update failed - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
     fi
 }
 
 # trap for the end log message for the end log
-trap 'on_exit' EXIT
+trap 'end_log;' EXIT
 
-# check another instance of the script is not running
-readonly LOCK_FILE="/run/lock/cert_update.lock"
-exec 99> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
-flock -n 99 || { echo "❌ Error: another instance is running, exit"; exit 1; }
+# check another instanse of the script is not running
+readonly LOCK_FILE="/run/lock/node_cert_update.lock"
+exec {fd}> "$LOCK_FILE" || { echo "Error: cannot open lock file '$LOCK_FILE', exit" >&2; exit 1; }
+flock -n "$fd" || { echo "Error: another instance is running, exit" >&2; exit 1; }
 
-# check secret file, if the file is ok, we source it.
-readonly ENV_FILE="/usr/local/etc/telegram/secrets.env"
-if [[ ! -f "$ENV_FILE" ]] || [[ "$(stat -L -c '%U:%a' "$ENV_FILE")" != "root:600" ]]; then
-    echo "❌ Error: env file '$ENV_FILE' not found or has wrong permissions, exit"
-    exit 1
-fi
-source "$ENV_FILE"
+# source Telegram func library
+# shellcheck source=share/telegram.lib.sh
+source "/usr/local/lib/service/telegram.lib.sh" || { echo "Error: failed to source '/usr/local/lib/service/telegram.lib.sh', exit" >&2; exit 1; }
 
-# check token from secret file
-[[ -z "$BOT_TOKEN" ]] && { echo "❌ Error: Telegram bot token is missing in '$ENV_FILE', exit"; exit 1; }
-
-# check group id from secret file
-[[ -z "$GROUP_ID" ]] && { echo "❌ Error: Telegram group ID is missing in '$ENV_FILE', exit"; exit 1; }
-
-# pure Telegram message function with checking the sending status
-_tg_m() {
-    local response
-    response="$(curl -fsS -m 10 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${GROUP_ID}" \
-        --data-urlencode "parse_mode=HTML" \
-        --data-urlencode "text=${MESSAGE}")" || return 1
-    grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' <<< "$response" || return 1
-    return 0
-}
-
-# Telegram message with logging and retry
-telegram_message() {
-    local attempt="1"
-    while true; do
-        if ! _tg_m; then
-            if [[ "$attempt" -ge "$MAX_ATTEMPTS" ]]; then
-                echo "❌ Error: failed to send Telegram message after $attempt attempts, exit"
-                return 1
-            fi
-            sleep 60
-            ((attempt++))
-            continue
-        else
-            echo "✅ Success: message was sent to Telegram after $attempt attempt"
-            return 0
-        fi
-    done
-}
-
-
-SERVER_LIST_FILE="/usr/local/etc/cert_update.cfg"
+SERVER_LIST_FILE="/usr/local/etc/node_cert_update/node_list.cfg"
 THRESHOLD_DAYS=15
 THRESHOLD_DAYS_ROOT=90
 ALL_TARGETS=()
@@ -104,6 +50,9 @@ SSH_KEY_NOT_FOUND_TARGETS=()
 SSH_CONNECT_FAILED_TARGETS=()
 CERT_CHECK_ERROR_TARGETS=()
 GENERATED_CRT_TARGETS=()
+
+[[ ! -f "$SERVER_LIST_FILE" ]] && { echo "Error: check '$SERVER_LIST_FILE' missing or not a file, exit" >&2; exit 1; }
+[[ ! -r "$SERVER_LIST_FILE" ]] && { echo "Error: check '$SERVER_LIST_FILE' missing or you do not have read permissions, exit" >&2; exit 1; }
 
 days_left_cert() {
     local crt="$1"
@@ -117,8 +66,15 @@ ROOT_CRT="/etc/prometheus/ca.crt"
 ROOT_EXPIRED="$(days_left_cert $ROOT_CRT)"
 PROMETHEUS_CRT="/etc/prometheus/prometheus_client.crt"
 PROMETHEUS_EXPIRED="$(days_left_cert $PROMETHEUS_CRT)"
-LOCALHOST_CRT="/usr/local/etc/node_exporter/tls/localhost.crt"
-LOCALHOST_EXPIRED="$(days_left_cert $LOCALHOST_CRT)"
+
+# if we not have node_exporter user, set expired to 100 days
+# for not update node_exporter sertificates because node_exporter not installed
+if getent passwd node_exporter &> /dev/null; then
+    LOCALHOST_EXPIRED=100
+else
+    LOCALHOST_CRT="/usr/local/etc/node_exporter/tls/localhost.crt"
+    LOCALHOST_EXPIRED="$(days_left_cert $LOCALHOST_CRT)"
+fi
 
 if [[ $ROOT_EXPIRED -lt 0 ]]; then
     MISSED_CERT_TARGETS+=("ROOT_CRT")
@@ -134,7 +90,7 @@ while read -r NODE PORT NODE_USER; do
     # skip empty srting
     [[ -z "${NODE}" ]] && continue
     # skip commented string
-    [[ "${NODE:0:1}" == "#" ]] && continue
+    [[ "$NODE" =~ ^[[:space:]]*# ]] && continue
     # save string in massive with | as border
     ALL_TARGETS+=("${NODE}|${PORT}|${NODE_USER}")
 done < "$SERVER_LIST_FILE"
@@ -168,7 +124,7 @@ if [[ $REPLACE_ALL == 0 ]]; then
 
         if [[ ! -f "$ssh_key" ]]; then
             SSH_KEY_NOT_FOUND_TARGETS+=("${NODE}")
-            echo "WARN: ssh_key not found: $ssh_key for $NODE (skip)" >&2
+            echo "Error: ssh_key not found: $ssh_key for $NODE (skip)" >&2
             continue
         fi
 
@@ -176,13 +132,13 @@ if [[ $REPLACE_ALL == 0 ]]; then
             ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${NODE_USER}@${NODE}" \
             "sudo -n bash -lc '$(declare -f days_left_cert); days_left_cert $remote_crt'"
         )" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
-            echo "WARN: ssh/openssl failed for $NODE (skip)" >&2
+            echo "Error: ssh/openssl failed for $NODE (skip)" >&2
             continue
         }
 
         if [[ -z "$days_left" ]]; then
             CERT_CHECK_ERROR_TARGETS+=("${NODE}")
-            echo "WARN: error date check sert for $NODE (skip)" >&2
+            echo "Error: error date check sert for $NODE (skip)" >&2
             continue
         fi
 
@@ -269,7 +225,7 @@ if [[ $REPLACE_ALL == 1 ]]; then
 
         if [[ ! -f "$ssh_key" ]]; then
             SSH_KEY_NOT_FOUND_TARGETS+=("${NODE}")
-            echo "WARN: ssh_key not found: $ssh_key for $NODE (skip)" >&2
+            echo "Error: ssh_key not found: $ssh_key for $NODE (skip)" >&2
             continue
         fi
 
@@ -277,14 +233,14 @@ if [[ $REPLACE_ALL == 1 ]]; then
 
         scp -P "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" \
         "/etc/prometheus/ca.crt" "${NODE_USER}@${NODE}:${TEMP_DIR}" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
-            echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
+            echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
         ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $TEMP_DIR; \
         sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
         sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
         sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
         sudo -n systemctl restart node_exporter.service" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
-            echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
+            echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
         GENERATED_CRT_TARGETS+=("${NODE}")
 
@@ -309,26 +265,26 @@ else
         IFS='|' read -r NODE PORT NODE_USER <<< "$record"
         generate_sert "$NODE"
 
-        ssh_key="/root/.ssh/${NODE}.ssh_key"
+        ssh_key="/root/.ssh/${NODE}.key"
         remote_crt="/usr/local/etc/node_exporter/tls/${NODE}.crt"
 
         if [[ ! -f "$ssh_key" ]]; then
             SSH_KEY_NOT_FOUND_TARGETS+=("${NODE}")
-            echo "WARN: ssh_key not found: $ssh_key for $NODE (skip)" >&2
+            echo "Error: ssh_key not found: $ssh_key for $NODE (skip)" >&2
             continue
         fi
         TEMP_DIR=$(ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" 'mktemp -d')
 
         scp -P "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" \
         "/etc/prometheus/ca.crt" "${NODE_USER}@${NODE}:${TEMP_DIR}" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
-            echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
+            echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
         ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $TEMP_DIR; \
         sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
         sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
         sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
         sudo -n systemctl restart node_exporter.service" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
-            echo "WARN: ssh/openssl failed for $NODE (skip)" >&2; continue; }
+            echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
         GENERATED_CRT_TARGETS+=("${NODE}")
     done
 fi
@@ -364,9 +320,9 @@ $(printf '❌ %s\n' "${SSH_KEY_NOT_FOUND_TARGETS[@]}")
 $(printf '❌ %s\n' "${SSH_CONNECT_FAILED_TARGETS[@]}")
 📝 <b>Error checking certificate hosts:</b>
 $(printf '❌ %s\n' "${CERT_CHECK_ERROR_TARGETS[@]}")
-💾 <b>Update log:</b> $UPDATE_LOG"
+💾 <b>Update log:</b> journalctl -t node_cert_update"
 
-echo "########## collected message - $DATE_MESSAGE ##########"
+echo "########## collected message - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
 echo "$MESSAGE"
 
 telegram_message && RC=0

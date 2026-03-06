@@ -5,20 +5,21 @@
 
 # check another instanse of the script is not running
 readonly LOCK_FILE="/run/lock/node_exporter_install.lock"
-exec 9> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
-flock -n 9 || { echo "❌ Error: another instance is running, exit"; exit 1; }
+exec {fd}> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
+flock -n "$fd" || { echo "❌ Error: another instance is running, exit"; exit 1; }
 
 # changing directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || { echo "❌ Error: couldn't change working directory, exit"; exit 1; }
 
+# shellcheck disable=SC1091
 source "node_name.cfg"
 
 umask 002
 
 # helper function
 run_and_check() {
-    action="$1"
+    local action="$1"
     shift 1
     if "$@" > /dev/null; then
         echo "✅ Success: $action"
@@ -31,7 +32,7 @@ run_and_check() {
 # create user with check existense
 node_exporter_user_add() { useradd -r -M -d /nonexistent -s /usr/sbin/nologin node_exporter || return 1; }
 if ! getent passwd node_exporter &> /dev/null; then
-    run_and_check "adding node exporter user" node_exporter_user_add
+    run_and_check "adding node_exporter user" node_exporter_user_add
 else
     echo "✅ Success: user node_exporter already exist"
 fi
@@ -64,7 +65,7 @@ _dl_with_retry() {
                 return 1
             fi
             sleep 60
-            (($attempt++))
+            ((attempt++))
             continue
         else
             echo "✅ Success: download ${label} after ${attempt} attempts"
@@ -153,7 +154,6 @@ download_and_verify() {
 download_and_verify "$NODE_EXPORTER_URL" "$TMP_DIR/node_exporter.tar.gz" "node_exporter"
 
 # Копируем в директорию к бинарникам
-mkdir -p /usr/local/bin/node_exporter
 mkdir -p /usr/local/etc/node_exporter/tls
 
 install -m 640 -o root -g node_exporter "ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"

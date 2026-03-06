@@ -5,8 +5,8 @@
 
 # check another instanse of the script is not running
 readonly LOCK_FILE="/run/lock/cert_install.lock"
-exec 9> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
-flock -n 9 || { echo "❌ Error: another instance is running, exit"; exit 1; }
+exec {fd}> "$LOCK_FILE" || { echo "❌ Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
+flock -n "$fd" || { echo "❌ Error: another instance is running, exit"; exit 1; }
 
 # changing directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,43 +14,78 @@ cd "$SCRIPT_DIR" || { echo "❌ Error: couldn't change working directory, exit";
 
 umask 002
 
-LOCAL="$(hostname).local"
+# helper function
+run_and_check() {
+    local action="$1"
+    shift 1
+    if "$@" > /dev/null; then
+        echo "✅ Success: $action"
+    else
+        echo "❌ Error: $action, exit"
+        exit 1
+    fi
+}
+
 read -rp "This script need to start on Prometheus node and have NODE_NAME.key privat key for node in /root/.ssh folder, yes if you agree: " AGREE
 
-[[ $AGREE =~ ^([yY]es)$ ]] || exit 0
+[[ $AGREE =~ ^[Yy][Ee][Ss]$ ]] || exit 0
 
-read -rp "Type node address, for self monitoring type localhost: " NODE
-if [[ "$NODE" == "$LOCAL" ]]; then
-    NODE=localhost
-fi
+read -rp "Type node domain address, for self monitoring type localhost or $(hostname).local: " NODE
+[[ "$NODE" == "$(hostname).local" ]] && NODE=localhost
+
 if [[ "$NODE" != "localhost" ]]; then
-    read -rp "Type node port: " PORT
+    read -rp "Type ssh node port: " PORT
     read -rp "Type node user: " NODE_USER
+    ssh_key="/root/.ssh/${NODE}.key"
+    [[ -f "$ssh_key" ]] || { echo "❌ Error: ssh key '$ssh_key' not found, exit!"; exit 1; }
 fi
 read -rp "First install? yes or no: " FIRST_INSTALL
 
-if [[ $FIRST_INSTALL =~ ^([yY]es)$ ]]; then
+# if first install == yes, install updater and other files
+if [[ $FIRST_INSTALL =~ ^[Yy][Ee][Ss]$ ]]; then
 
-mkdir -p "/var/log/service"
-mkdir -p /usr/local/etc/telegram
-install -m 600 -g root -o root secrets.env /usr/local/etc/telegram/secrets.env
+    # check cert for decide this first install or not
+    [[ -f "/etc/prometheus/ca.key" ]] && \
+    { echo "❌ Error: found prometheus certificates, this not first install, check all the information you entered again, exit!"; exit 1; }
 
-ssh_key="/root/.ssh/${NODE}.key"
+    mkdir -p "/usr/local/lib/service"
+    mkdir -p "/usr/local/bin/service"
+    mkdir -p /usr/local/etc/telegram
 
-install -m 750 -g root -o root "cert_update.sh" "/usr/local/bin/cert_update.sh"
+    # create user with check existense
+    telegram_gateway_user_add() { useradd -r -M -d /nonexistent -s /usr/sbin/nologin telegram_gateway || return 1; }
+    if ! getent passwd telegram_gateway &> /dev/null; then
+        run_and_check "adding telegram_gateway user" telegram_gateway_user_add
+    else
+        echo "✅ Success: user telegram_gateway already exist"
+    fi
 
-install -m 640 -g root -o root "cert_update.cfg" "/usr/local/etc/cert_update.cfg"
+    if [[ -f "/usr/local/etc/telegram/secrets.env" ]]; then
+        echo "✅ Success: Telegram secrets already installed"
+    else
+        install -m 640 -g telegram_gateway -o root "cfg/secrets.env" "/usr/local/etc/telegram/secrets.env"
+    fi
 
-tee /etc/systemd/system/node_cert_updater.service > /dev/null <<EOF
+    if [[ -f "/usr/local/lib/service/telegram.lib.sh" ]]; then
+        echo "✅ Success: Telegram library already installed"
+    else
+        install -m 644 -g root -o root "share/telegram.lib.sh" "/usr/local/lib/service/telegram.lib.sh"
+    fi
+
+    install -m 750 -g root -o root "node_cert_update.sh" "/usr/local/bin/service/node_cert_update.sh"
+    install -m 640 -g root -o root "cfg/node_list.cfg" "/usr/local/etc/node_cert_update/node_list.cfg"
+
+
+    tee /etc/systemd/system/node_cert_update.service > /dev/null <<EOF
 [Unit]
-Description=Updater for node exporter and prometheus sert
+Description=Updater for node exporter and prometheus certificates
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/cert_update.sh
+ExecStart=/usr/local/bin/service/node_cert_update.sh
 EOF
 
-tee /etc/systemd/system/node_cert_updater.timer > /dev/null <<EOF
+tee /etc/systemd/system/node_cert_update.timer > /dev/null <<EOF
 [Unit]
 Description=Daily random timer 01:00-05:00 for node exporter and prometheus sert updater
 
@@ -58,45 +93,45 @@ Description=Daily random timer 01:00-05:00 for node exporter and prometheus sert
 OnCalendar=*-*-* 01:00:00
 RandomizedDelaySec=4h
 Persistent=true
-Unit=node_cert_updater.service
+Unit=node_cert_update.service
 
 [Install]
 WantedBy=timers.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now node_cert_updater.timer
+    systemctl daemon-reload
+    systemctl enable --now node_cert_update.timer
 
-# generation Certificate Autority private key
-openssl genrsa -out "/etc/prometheus/ca.key" 4096
+    # generation Certificate Autority private key
+    openssl genrsa -out "/etc/prometheus/ca.key" 4096
 
-# generation Certificate Autority public sert
-openssl req -x509 -new -nodes -key "/etc/prometheus/ca.key" -sha256 -days 455 -out "/etc/prometheus/ca.crt" -subj "/CN=metrics-mtls-ca"
+    # generation Certificate Autority public sert
+    openssl req -x509 -new -nodes -key "/etc/prometheus/ca.key" -sha256 -days 455 -out "/etc/prometheus/ca.crt" -subj "/CN=metrics-mtls-ca"
 
-# generate prometheus private sert
-openssl genrsa -out "/etc/prometheus/prometheus_client.key" 2048
+    # generate prometheus private sert
+    openssl genrsa -out "/etc/prometheus/prometheus_client.key" 2048
 
-# generate prometheus public sert
-openssl req -new -key "/etc/prometheus/prometheus_client.key" -out "/etc/prometheus/prometheus_client.crt" \
-  -subj "/CN=prometheus"
+    # generate prometheus public sert
+    openssl req -new -key "/etc/prometheus/prometheus_client.key" -out "/etc/prometheus/prometheus_client.crt" \
+        -subj "/CN=prometheus"
 
 # make cfg for signature
-tee "/etc/prometheus/prometheus_client.ext" > /dev/null <<'EOF'
+    tee "/etc/prometheus/prometheus_client.ext" > /dev/null <<'EOF'
 [ v3_req ]
 extendedKeyUsage = clientAuth
 EOF
 
 # signature prometheus sertificate
-openssl x509 -req -in /etc/prometheus/prometheus_client.crt -CA /etc/prometheus/ca.crt -CAkey /etc/prometheus/ca.key -CAcreateserial \
-  -out /etc/prometheus/prometheus_client.crt -days 45 -sha256 -extfile /etc/prometheus/prometheus_client.ext -extensions v3_req
+    openssl x509 -req -in /etc/prometheus/prometheus_client.crt -CA /etc/prometheus/ca.crt -CAkey /etc/prometheus/ca.key -CAcreateserial \
+        -out /etc/prometheus/prometheus_client.crt -days 45 -sha256 -extfile /etc/prometheus/prometheus_client.ext -extensions v3_req
 
-chown root:prometheus /etc/prometheus/prometheus_client.crt
-chmod 640 /etc/prometheus/prometheus_client.crt
-chown root:prometheus /etc/prometheus/prometheus_client.key
-chmod 640 /etc/prometheus/prometheus_client.key
-chown root:prometheus /etc/prometheus/ca.crt
-chmod 640 /etc/prometheus/ca.crt
-chmod 600 /etc/prometheus/ca.key
+    chown root:prometheus /etc/prometheus/prometheus_client.crt
+    chmod 640 /etc/prometheus/prometheus_client.crt
+    chown root:prometheus /etc/prometheus/prometheus_client.key
+    chmod 640 /etc/prometheus/prometheus_client.key
+    chown root:prometheus /etc/prometheus/ca.crt
+    chmod 640 /etc/prometheus/ca.crt
+    chmod 600 /etc/prometheus/ca.key
 fi
 
 # generation private key for node
@@ -119,19 +154,19 @@ EOF
 openssl x509 -req -in "/etc/prometheus/${NODE}.crt" -CA "/etc/prometheus/ca.crt" -CAkey "/etc/prometheus/ca.key" -CAcreateserial \
   -out "/etc/prometheus/${NODE}.crt" -days 45 -sha256 -extfile "/etc/prometheus/${NODE}.ext" -extensions v3_req
 
-tee node_name.cfg > /dev/null <<EOF
+tee "cfg/node_name.cfg" > /dev/null <<EOF
 NODE="${NODE}"
 EOF
 
 if [[ "$NODE" == "localhost" ]]; then
     TEMP_DIR="$(mktemp -d)"
-    cp "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" "/etc/prometheus/ca.crt" "node_exporter_install.sh" "node_name.cfg" "${TEMP_DIR}/"
+    cp "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" "/etc/prometheus/ca.crt" "node_exporter_install.sh" "cfg/node_name.cfg" "${TEMP_DIR}/"
     cd "$TEMP_DIR" || exit 1
     bash node_exporter_install.sh
 else
     TEMP_DIR=$(ssh -o StrictHostKeyChecking=accept-new -p "${PORT}" -o BatchMode=yes -i "$ssh_key" "${NODE_USER}@${NODE}" 'mktemp -d')
     scp -P "${PORT}" -o BatchMode=yes -i "$ssh_key" "/etc/prometheus/${NODE}.key" "/etc/prometheus/${NODE}.crt" \
-    "/etc/prometheus/ca.crt" "node_exporter_install.sh" "node_name.cfg" "${NODE_USER}@${NODE}:${TEMP_DIR}"
+    "/etc/prometheus/ca.crt" "node_exporter_install.sh" "cfg/node_name.cfg" "${NODE_USER}@${NODE}:${TEMP_DIR}"
     ssh -p "${PORT}" -i "$ssh_key" "${NODE_USER}@${NODE}" "cd '${TEMP_DIR}'; sudo -n bash node_exporter_install.sh"
 fi
 
@@ -164,8 +199,8 @@ fi
 
 systemctl restart prometheus.service
 
-if [[ "$NODE" != "localhost" ]] && ! grep -q "${NODE}" /usr/local/etc/cert_update.cfg; then
-    tee -a /usr/local/etc/cert_update.cfg > /dev/null <<EOF
+if [[ "$NODE" != "localhost" ]] && ! grep -q "${NODE}" /usr/local/etc/node_cert_update/node_list.cfg; then
+    tee -a /usr/local/etc/node_cert_update/node_list.cfg > /dev/null <<EOF
 ${NODE} ${PORT} ${NODE_USER}
 EOF
 fi
