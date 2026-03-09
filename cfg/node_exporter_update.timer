@@ -1,0 +1,10 @@
+[Unit]
+Description=Timer for run node_exporter_update.service monthly on day 1 at night 01:00-05:00
+
+[Timer]
+OnCalendar=*-*-01 01:00:00
+Persistent=true
+RandomizedDelaySec=4h
+
+[Install]
+WantedBy=timers.target

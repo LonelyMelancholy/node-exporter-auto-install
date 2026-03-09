@@ -15,7 +15,29 @@ cd "$SCRIPT_DIR" || { echo "❌ Error: couldn't change working directory, exit";
 # shellcheck disable=SC1091
 source "node_name.cfg"
 
-umask 002
+# main variables
+LATEST_TAG=$(curl -Ls -o /dev/null -w '%{url_effective}' \
+    "https://github.com/prometheus/node_exporter/releases/latest" \
+    | awk -F'/tag/' '{print $2}')
+OS_ARCH="linux-amd64"
+NODE_EXPORTER_FILE="node_exporter-${LATEST_TAG#v}.${OS_ARCH}.tar.gz"
+SHA256SUM_FILE="sha256sums.txt"
+NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/latest/download/"
+MAX_ATTEMPTS=3
+umask 022
+
+# exit cleanup and log message function
+# shellcheck disable=SC2329
+exit_cleanup() {
+    if rm -rf "$SCRIPT_DIR"; then
+        echo "Success: delete tmp files"
+    else
+        echo "Error: delete tmp files"
+    fi
+}
+
+# set trap for exit cleanup
+trap 'exit_cleanup;' EXIT
 
 # helper function
 run_and_check() {
@@ -36,17 +58,6 @@ if ! getent passwd node_exporter &> /dev/null; then
 else
     echo "✅ Success: user node_exporter already exist"
 fi
-
-# main variables
-LATEST_TAG=$(curl -Ls -o /dev/null -w '%{url_effective}' \
-    "https://github.com/prometheus/node_exporter/releases/latest" \
-    | awk -F'/tag/' '{print $2}')
-OS_ARCH="linux-amd64"
-NODE_EXPORTER_FILE="node_exporter-${LATEST_TAG#v}.${OS_ARCH}.tar.gz"
-SHA256SUM_FILE="sha256sums.txt"
-NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/latest/download/"
-TMP_DIR=$(mktemp -d)
-MAX_ATTEMPTS=3
 
 # download function
 _dl() { curl -fsSL -m 60 "$1" -o "$2"; }
@@ -81,7 +92,6 @@ download_and_verify() {
     local name="$3"
     local sha256sum_file="${outfile}.sha256sum"
     local expected_sha actual_sha
-    UNPACK_DIR="$TMP_DIR"
 
     # download main file
     _dl_with_retry "${url}${NODE_EXPORTER_FILE}" "$outfile" "$name" || exit 1
@@ -111,37 +121,27 @@ download_and_verify() {
         echo "✅ Success: extraction SHA256 from ${outfile}"
     fi
 
-    local expected_label actual_label
     # compare sha256sum checksum
-        expected_label=".sha256sum"
-        actual_label=".tar.gz"
-
     if [ "$expected_sha" != "$actual_sha" ]; then
-        echo "📢 Info: expected SHA256 from ${expected_label}: $expected_sha"
-        echo "📢 Info: actual SHA256 from ${actual_label}: $actual_sha"
+        echo "📢 Info: expected SHA256 from '.sha256sum': $expected_sha"
+        echo "📢 Info: actual SHA256 from '.tar.gz': $actual_sha"
         echo "❌ Error: compare, actual and expected SHA256 do not match for ${name}, exit"
         exit 1
     else
-        echo "📢 Info: expected SHA256 from ${expected_label}: $expected_sha"
-        echo "📢 Info: actual SHA256 from ${actual_label}: $actual_sha"
+        echo "📢 Info: expected SHA256 from '.sha256sum': $expected_sha"
+        echo "📢 Info: actual SHA256 from '.tar.gz': $actual_sha"
         echo "✅ Success: actual and expected SHA256 match for ${name}"
     fi
 
     # unpack archive
-    if ! mkdir -p "$UNPACK_DIR"; then
-        echo "❌ Error: create directory for unpacking ${outfile}, exit"
-        exit 1
-    else
-        echo "✅ Success: directory for unpacking ${outfile} has been created"
-    fi
-    if ! tar -xzf "$outfile" -C "$UNPACK_DIR" &> /dev/null; then
+    if ! tar -xzf "$outfile" -C . &> /dev/null; then
         echo "❌ Error: extract ${outfile}, exit"
         exit 1
     else
         echo "✅ Success: ${outfile} successfully extracted"
     fi
-    # check xray binary
-    if [ ! -f "$UNPACK_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" ]; then
+    # check node exporter binary
+    if [ ! -f "node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" ]; then
         echo "❌ Error: node exporter binary is missing from folder after unpacking ${outfile}, exit"
         exit 1
     else
@@ -151,7 +151,7 @@ download_and_verify() {
     return 0
 }
 
-download_and_verify "$NODE_EXPORTER_URL" "$TMP_DIR/node_exporter.tar.gz" "node_exporter"
+download_and_verify "$NODE_EXPORTER_URL" "node_exporter.tar.gz" "node_exporter"
 
 # Копируем в директорию к бинарникам
 mkdir -p /usr/local/etc/node_exporter/tls
@@ -159,7 +159,8 @@ mkdir -p /usr/local/etc/node_exporter/tls
 install -m 640 -o root -g node_exporter "ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
 install -m 640 -o root -g node_exporter "${NODE}.crt" "/usr/local/etc/node_exporter/tls/${NODE}.crt"
 install -m 640 -o root -g node_exporter "${NODE}.key" "/usr/local/etc/node_exporter/tls/${NODE}.key"
-install -m 755 -o root -g root "$UNPACK_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter"
+install -m 755 -o root -g root "node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter"
+install -m 755 -o root -g root "node_exporter_update.sh" "/usr/local/bin/service/node_exporter_update.sh"
 
 # web-config
 tee /usr/local/etc/node_exporter/mtls_auth.yml > /dev/null <<EOF
@@ -173,25 +174,14 @@ tls_server_config:
     min_version: TLS13
 EOF
 
-# create systemd daemon
-tee /etc/systemd/system/node_exporter.service > /dev/null <<'EOF'
-[Unit]
-Description=Node Exporter
-Wants=network-online.target
-After=network-online.target
+# install node exporter systemd daemon
+install -m 644 -o root -g root "node_exporter.service" "/etc/systemd/system/node_exporter.service"
 
-[Service]
-User=node_exporter
-Group=node_exporter
-ExecStart=/usr/local/bin/node_exporter \
-    --web.listen-address=":9100" \
-    --web.config.file=/usr/local/etc/node_exporter/mtls_auth.yml
-Restart=always
+# install node exporter updater systemd daemon and timer
+install -m 644 -o root -g root "node_exporter_update.service" "/etc/systemd/system/node_exporter_update.service"
+install -m 644 -o root -g root "node_exporter_update.timer" "/etc/systemd/system/node_exporter_update.timer"
 
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# run after generation sert
+# run all daemon
 systemctl daemon-reload
-systemctl enable --now node_exporter.service
+systemctl enable -q --now node_exporter.service
+systemctl enable -q --now node_exporter_update.timer

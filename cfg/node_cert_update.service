@@ -1,0 +1,6 @@
+[Unit]
+Description=Updater for node exporter and prometheus certificates
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/service/node_cert_update.sh

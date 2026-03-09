@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily random timer 01:00-05:00 for node exporter and prometheus certificates updater
+
+[Timer]
+OnCalendar=*-*-* 01:00:00
+RandomizedDelaySec=4h
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Updater for node exporter binares
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/service/node_exporter_update.sh
