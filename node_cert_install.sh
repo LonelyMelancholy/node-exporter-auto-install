@@ -65,30 +65,8 @@ if [[ $FIRST_INSTALL =~ ^[Yy][Ee][Ss]$ ]]; then
     [[ -f "/etc/prometheus/ca.key" ]] && \
     { echo "❌ Error: found prometheus certificates, this not first install, check all the information you entered again, exit!"; exit 1; }
 
-    mkdir -p "/usr/local/lib/service"
     mkdir -p "/usr/local/bin/service"
-    mkdir -p /usr/local/etc/telegram
     mkdir -p /usr/local/etc/node_cert_update
-    
-    # create user with check existense
-    telegram_gateway_user_add() { useradd -r -M -d /nonexistent -s /usr/sbin/nologin telegram_gateway || return 1; }
-    if ! getent passwd telegram_gateway &> /dev/null; then
-        run_and_check "adding telegram_gateway user" telegram_gateway_user_add
-    else
-        echo "✅ Success: user telegram_gateway already exist"
-    fi
-
-    if [[ -f "/usr/local/etc/telegram/secrets.env" ]]; then
-        echo "✅ Success: Telegram secrets already installed"
-    else
-        install -m 640 -g telegram_gateway -o root "cfg/secrets.env" "/usr/local/etc/telegram/secrets.env"
-    fi
-
-    if [[ -f "/usr/local/lib/service/telegram.lib.sh" ]]; then
-        echo "✅ Success: Telegram library already installed"
-    else
-        install -m 644 -g root -o root "share/telegram.lib.sh" "/usr/local/lib/service/telegram.lib.sh"
-    fi
 
     # install script for update and list nodes
     install -m 750 -g root -o root "node_cert_update.sh" "/usr/local/bin/service/node_cert_update.sh"
@@ -147,28 +125,35 @@ DNS.1 = ${NODE}
 EOF
 
 # signature node sertificate
-openssl x509 -req -in "${TMP_DIR}/${NODE}.crt" -CA "${TMP_DIR}/ca.crt" -CAkey "${TMP_DIR}/ca.key" -CAcreateserial \
+openssl x509 -req -in "${TMP_DIR}/${NODE}.crt" -CA "/etc/prometheus/ca.crt" -CAkey "/etc/prometheus/ca.key" -CAcreateserial \
   -out "${TMP_DIR}/${NODE}.crt" -days 45 -sha256 -extfile "${TMP_DIR}/${NODE}.ext" -extensions v3_req
 
-tee "cfg/node_name.cfg" > /dev/null <<EOF
+tee "${TMP_DIR}/node_name.cfg" > /dev/null <<EOF
 # file for transfer node name to remote host
 # source in node_exporter_install
 NODE="${NODE}"
 EOF
 
 if [[ "$NODE" == "localhost" ]]; then
-    cp "node_exporter_install.sh" "cfg/node_exporter.service" "node_exporter_update.sh" "cfg/node_exporter_update.service" "cfg/node_exporter_update.timer" "cfg/node_name.cfg" "${TMP_DIR}/"
+    cp "/etc/prometheus/ca.crt" "node_exporter_install.sh" "cfg/node_exporter.service" "node_exporter_update.sh" "cfg/node_exporter_update.service" "cfg/node_exporter_update.timer" "${TMP_DIR}/"
     cd "${TMP_DIR}" || exit 1
-    bash node_exporter_install.sh
+    bash node_exporter_install.sh install_from_script
 else
     REMOTE_TMP_DIR=$(ssh -o StrictHostKeyChecking=accept-new -p "${PORT}" -o BatchMode=yes -i "$ssh_key" "${NODE_USER}@${NODE}" 'mktemp -d')
-    scp -P "${PORT}" -o BatchMode=yes -i "$ssh_key" "${TMP_DIR}/${NODE}.key" "${TMP_DIR}/${NODE}.crt" \
+    scp -P "${PORT}" -o BatchMode=yes -i "$ssh_key" "cfg/secrets.env" "share/telegram.lib.sh" "${TMP_DIR}/${NODE}.key" "${TMP_DIR}/${NODE}.crt" \
     "/etc/prometheus/ca.crt" "node_exporter_install.sh" "cfg/node_exporter.service" "node_exporter_update.sh" \
-    "cfg/node_exporter_update.service" "cfg/node_exporter_update.timer" "cfg/node_name.cfg" "${NODE_USER}@${NODE}:${REMOTE_TMP_DIR}"
-    ssh -p "${PORT}" -i "$ssh_key" "${NODE_USER}@${NODE}" "cd '${REMOTE_TMP_DIR}'; sudo -n bash node_exporter_install.sh"
+    "cfg/node_exporter_update.service" "cfg/node_exporter_update.timer" "${TMP_DIR}/node_name.cfg" "${NODE_USER}@${NODE}:${REMOTE_TMP_DIR}"
+    ssh -p "${PORT}" -i "$ssh_key" "${NODE_USER}@${NODE}" "cd '${REMOTE_TMP_DIR}'; sudo -n bash node_exporter_install.sh install_from_script"
 fi
 
-if ! grep -q "job_name: ${NODE}" /etc/prometheus/prometheus.yml; then
+# function for checking exact word match in file
+domain_check() {
+    local domain="$1"
+    local file="$2"
+    awk -v d="$domain" '{for(i=1;i<=NF;i++) if($i==d){found=1; exit}} END{exit !found}' "$file"
+}
+
+if ! domain_check "job_name: ${NODE}" "/etc/prometheus/prometheus.yml"; then
 tee -a /etc/prometheus/prometheus.yml > /dev/null <<EOF
   - job_name: ${NODE}
     scheme: https
@@ -184,9 +169,9 @@ EOF
 fi
 
 # need to check resolve this section for prometheus .local domain
-#if [[ ${NODE} != localhost ]] && ! grep -q "${NODE}" /etc/hosts; then
+#if [[ ${NODE} != localhost ]] && ! domain_check "${NODE}" "/etc/hosts"; then
 #    IP_NODE="$(getent hosts "${NODE}")"
-#    if grep "${NODE}" "/etc/hosts"; then
+#    if domain_check "${NODE}" "/etc/hosts"; then
 #        echo "${NODE} already in /etc/hosts"
 #    else
 #        tee -a /etc/hosts > /dev/null <<EOF
@@ -198,7 +183,7 @@ fi
 
 systemctl restart prometheus.service
 
-if [[ "$NODE" != "localhost" ]] && ! grep -q "${NODE}" /usr/local/etc/node_cert_update/node_list.cfg; then
+if [[ "$NODE" != "localhost" ]] && ! domain_check "${NODE}" "/usr/local/etc/node_cert_update/node_list.cfg"; then
     tee -a /usr/local/etc/node_cert_update/node_list.cfg > /dev/null <<EOF
 ${NODE} ${PORT} ${NODE_USER}
 EOF

@@ -229,7 +229,7 @@ DNS.1 = ${node}
 EOF
 
     # signature node sertificate
-    openssl x509 -req -in "${TMP_DIR}/${node}.crt" -CA "${TMP_DIR}/ca.crt" -CAkey "${TMP_DIR}/ca.key" -CAcreateserial \
+    openssl x509 -req -in "${TMP_DIR}/${node}.crt" -CA "/etc/prometheus/ca.crt" -CAkey "/etc/prometheus/ca.key" -CAcreateserial \
         -out "${TMP_DIR}/${node}.crt" -days 45 -sha256 -extfile "${TMP_DIR}/${node}.ext" -extensions v3_req
 }
 

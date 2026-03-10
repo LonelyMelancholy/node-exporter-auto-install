@@ -1,5 +1,7 @@
 #!/bin/bash
 
+[ "$1" != install_from_script ] && { echo "❌ Error: run only from node_cert_install"; exit 1; }
+
 # root check
 [[ $EUID -ne 0 ]] && { echo "❌ Error: you are not the root user, exit"; exit 1; }
 
@@ -153,7 +155,10 @@ download_and_verify() {
 
 download_and_verify "$NODE_EXPORTER_URL" "node_exporter.tar.gz" "node_exporter"
 
-# Копируем в директорию к бинарникам
+# make all directory for install bin and settings
+mkdir -p "/usr/local/bin/service"
+mkdir -p "/usr/local/lib/service"
+mkdir -p /usr/local/etc/telegram
 mkdir -p /usr/local/etc/node_exporter/tls
 
 install -m 640 -o root -g node_exporter "ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
@@ -161,6 +166,26 @@ install -m 640 -o root -g node_exporter "${NODE}.crt" "/usr/local/etc/node_expor
 install -m 640 -o root -g node_exporter "${NODE}.key" "/usr/local/etc/node_exporter/tls/${NODE}.key"
 install -m 755 -o root -g root "node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter"
 install -m 755 -o root -g root "node_exporter_update.sh" "/usr/local/bin/service/node_exporter_update.sh"
+
+# create user with check existense
+telegram_gateway_user_add() { useradd -r -M -d /nonexistent -s /usr/sbin/nologin telegram_gateway || return 1; }
+if ! getent passwd telegram_gateway &> /dev/null; then
+    run_and_check "adding telegram_gateway user" telegram_gateway_user_add
+else
+    echo "✅ Success: user telegram_gateway already exist"
+fi
+
+if [[ -f "/usr/local/etc/telegram/secrets.env" ]]; then
+    echo "✅ Success: Telegram secrets already installed"
+else
+    install -m 640 -g telegram_gateway -o root "secrets.env" "/usr/local/etc/telegram/secrets.env"
+fi
+
+if [[ -f "/usr/local/lib/service/telegram.lib.sh" ]]; then
+    echo "✅ Success: Telegram library already installed"
+else
+    install -m 644 -g root -o root "telegram.lib.sh" "/usr/local/lib/service/telegram.lib.sh"
+fi
 
 # web-config
 tee /usr/local/etc/node_exporter/mtls_auth.yml > /dev/null <<EOF

@@ -5,6 +5,8 @@ PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 TS=$(date '+%Y%m%d_%H%M%S')
 DATE_START=$(date '+%Y-%m-%d %H:%M:%S')
+FAIL_TD=0
+RC=1
 
 # enable logging
 exec > >(systemd-cat -t node_exporter_update -p info) 2> >(systemd-cat -t node_exporter_update -p err) 5> >(systemd-cat -t node_exporter_update -p notice)
@@ -25,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || { echo "Error: couldn't change working directory, exit"; exit 1; }
 
 # exit logging message function
-RC="1"
+# shellcheck disable=SC2329
 end_log() {
     if [[ "$RC" -eq "0" ]]; then
         echo "########## node exporter update ended - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
@@ -73,6 +75,7 @@ MAX_ATTEMPTS=3
 umask 022
 
 # helper function
+# shellcheck disable=SC2329
 run_and_check() {
     local action="$1"
     shift 1
@@ -256,6 +259,7 @@ _install() {
 }
 
 # install node_exporter files function
+# shellcheck disable=SC2329
 install_node_exporter() {
     N_E_NEW_VER=""
     N_E_OLD_VER=""
@@ -326,7 +330,7 @@ install_node_exporter() {
     return 0
 }
 
-cleanup_old "/usr/local/bin" "node_exporter.bak.*" "$XRAY_DIR/xray.bak.${TS}" "node exporter backup"
+cleanup_old "/usr/local/bin" "node_exporter.bak.*" "/usr/local/bin/node_exporter.bak.${TS}" "node exporter backup"
 
 # update node exporter
 if ! download_and_verify "$NODE_EXPORTER_URL" "$TMP_DIR/node_exporter.tar.gz" "node_exporter"; then
@@ -343,10 +347,10 @@ if [ "$NODE_EXPORTER_DOWNLOAD" = "1" ]; then
         NODE_EXPORTER_INSTALL=0
     else
         if [ "$N_E_UP_TO_DATE" = "1" ]; then
-            STATUS_INSTALL_MESSAGE+="☑️ node exporter already up to date $XRAY_OLD_VER"
+            STATUS_INSTALL_MESSAGE+="☑️ node exporter already up to date $N_E_OLD_VER"
             NODE_EXPORTER_INSTALL=1
         else
-            STATUS_INSTALL_MESSAGE+="☑️ node exporter updated from $XRAY_OLD_VER to $XRAY_NEW_VER"
+            STATUS_INSTALL_MESSAGE+="☑️ node exporter updated from $N_E_OLD_VER to $N_E_NEW_VER"
             NODE_EXPORTER_INSTALL=1
         fi
     fi
@@ -355,7 +359,7 @@ else
     STATUS_INSTALL_MESSAGE="⚠️ node exporter install skip"
 fi
 
-# check final xray status
+# check final node exporter status
 if systemctl is-active --quiet node_exporter.service; then
     STATUS_NODE_EXPORTER="☑️ Success: node_exporter.service is running"
 else
