@@ -67,6 +67,8 @@ if [[ $FIRST_INSTALL =~ ^[Yy][Ee][Ss]$ ]]; then
 
     mkdir -p "/usr/local/bin/service"
     mkdir -p /usr/local/etc/node_cert_update
+    mkdir -p "/usr/local/lib/service"
+    mkdir -p /usr/local/etc/telegram
 
     # install script for update and list nodes
     install -m 750 -g root -o root "node_cert_update.sh" "/usr/local/bin/service/node_cert_update.sh"
@@ -75,6 +77,26 @@ if [[ $FIRST_INSTALL =~ ^[Yy][Ee][Ss]$ ]]; then
     # install update unit and timer
     install -m 644 -g root -o root "cfg/node_cert_update.service" "/etc/systemd/system/node_cert_update.service"
     install -m 644 -g root -o root "cfg/node_cert_update.timer" "/etc/systemd/system/node_cert_update.timer"
+
+    # create user with check existense
+    telegram_gateway_user_add() { useradd -r -M -d /nonexistent -s /usr/sbin/nologin telegram_gateway || return 1; }
+    if ! getent passwd telegram_gateway &> /dev/null; then
+        run_and_check "adding telegram_gateway user" telegram_gateway_user_add
+    else
+        echo "✅ Success: user telegram_gateway already exist"
+    fi
+
+    if [[ -f "/usr/local/etc/telegram/secrets.env" ]]; then
+        echo "✅ Success: Telegram secrets already installed"
+    else
+        install -m 640 -g telegram_gateway -o root "secrets.env" "/usr/local/etc/telegram/secrets.env"
+    fi
+
+    if [[ -f "/usr/local/lib/service/telegram.lib.sh" ]]; then
+        echo "✅ Success: Telegram library already installed"
+    else
+        install -m 644 -g root -o root "telegram.lib.sh" "/usr/local/lib/service/telegram.lib.sh"
+    fi
 
     systemctl daemon-reload
     systemctl enable -q --now node_cert_update.timer
@@ -135,7 +157,7 @@ NODE="${NODE}"
 EOF
 
 if [[ "$NODE" == "localhost" ]]; then
-    cp "/etc/prometheus/ca.crt" "node_exporter_install.sh" "cfg/node_exporter.service" "node_exporter_update.sh" "cfg/node_exporter_update.service" "cfg/node_exporter_update.timer" "${TMP_DIR}/"
+    cp  "cfg/secrets.env" "share/telegram.lib.sh" "/etc/prometheus/ca.crt" "node_exporter_install.sh" "cfg/node_exporter.service" "node_exporter_update.sh" "cfg/node_exporter_update.service" "cfg/node_exporter_update.timer" "${TMP_DIR}/"
     cd "${TMP_DIR}" || exit 1
     bash node_exporter_install.sh install_from_script
 else
@@ -153,7 +175,7 @@ domain_check() {
     awk -v d="$domain" '{for(i=1;i<=NF;i++) if($i==d){found=1; exit}} END{exit !found}' "$file"
 }
 
-if ! domain_check "job_name: ${NODE}" "/etc/prometheus/prometheus.yml"; then
+if ! domain_check "${NODE}" "/etc/prometheus/prometheus.yml"; then
 tee -a /etc/prometheus/prometheus.yml > /dev/null <<EOF
   - job_name: ${NODE}
     scheme: https

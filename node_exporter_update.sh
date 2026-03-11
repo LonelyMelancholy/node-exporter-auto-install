@@ -296,20 +296,22 @@ install_node_exporter() {
         echo "Info: node_exporter already up to date, backup not needed"
     fi
 
-    # stop node_exporter service
-    if systemctl stop node_exporter.service &> /dev/null; then
-        echo "Success: node_exporter.service stopped, starting the update"
-    else
-        echo "Error: failed to stop node_exporter.service, cancelling update" >&2
-        echo "Info: checking status node_exporter.service"
-        if systemctl is-active --quiet node_exporter.service; then
-            echo "Success: node_exporter.service is running, try updating again later, exit"
-            return 1
+    # stop node_exporter service for update
+    if [[ "$N_E_UP_TO_DATE" == 0 ]]; then
+        if systemctl stop node_exporter.service &> /dev/null; then
+            echo "Success: node_exporter.service stopped, starting the update"
         else
-            echo "Error: node_exporter.service is not running, trying to start" >&2
-            _node_exporter_start_on_fail
-            return 1
-        fi 
+            echo "Error: failed to stop node_exporter.service, cancelling update" >&2
+            echo "Info: checking status node_exporter.service"
+            if systemctl is-active --quiet node_exporter.service; then
+                echo "Success: node_exporter.service is running, try updating again later, exit"
+                return 1
+            else
+                echo "Error: node_exporter.service is not running, trying to start" >&2
+                _node_exporter_start_on_fail
+                return 1
+            fi 
+        fi
     fi
 
     # install node_exporter bin

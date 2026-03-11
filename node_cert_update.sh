@@ -253,10 +253,10 @@ if [[ $REPLACE_ALL == 1 ]]; then
         "/etc/prometheus/ca.crt" "${NODE_USER}@${NODE}:${REMOTE_TMP_DIR}" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
-        ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $REMOTE_TMP_DIR; \
-        sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
-        sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
-        sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
+        ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $REMOTE_TMP_DIR && \
+        sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt && \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt && \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key && \
         sudo -n systemctl restart node_exporter.service" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
@@ -301,10 +301,10 @@ else
         "/etc/prometheus/ca.crt" "${NODE_USER}@${NODE}:${REMOTE_TMP_DIR}" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
 
-        ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $REMOTE_TMP_DIR; \
-        sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt; \
-        sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt; \
-        sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key; \
+        ssh -p "${PORT}" -i "$ssh_key" -o ConnectTimeout=10 -o BatchMode=yes "${NODE_USER}@${NODE}" "cd $REMOTE_TMP_DIR && \
+        sudo -n install -m 640 -o root -g node_exporter ca.crt /usr/local/etc/node_exporter/tls/ca.crt && \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.crt /usr/local/etc/node_exporter/tls/${NODE}.crt && \
+        sudo -n install -m 640 -o root -g node_exporter ${NODE}.key /usr/local/etc/node_exporter/tls/${NODE}.key && \
         sudo -n systemctl restart node_exporter.service" || { SSH_CONNECT_FAILED_TARGETS+=("${NODE}")
             echo "Error: ssh/openssl failed for $NODE (skip)" >&2; continue; }
         GENERATED_CRT_TARGETS+=("${NODE}")
