@@ -89,13 +89,13 @@ if [[ $FIRST_INSTALL =~ ^[Yy][Ee][Ss]$ ]]; then
     if [[ -f "/usr/local/etc/telegram/secrets.env" ]]; then
         echo "✅ Success: Telegram secrets already installed"
     else
-        install -m 640 -g telegram_gateway -o root "secrets.env" "/usr/local/etc/telegram/secrets.env"
+        install -m 640 -g telegram_gateway -o root "cfg/secrets.env" "/usr/local/etc/telegram/secrets.env"
     fi
 
     if [[ -f "/usr/local/lib/service/telegram.lib.sh" ]]; then
         echo "✅ Success: Telegram library already installed"
     else
-        install -m 644 -g root -o root "telegram.lib.sh" "/usr/local/lib/service/telegram.lib.sh"
+        install -m 644 -g root -o root "share/telegram.lib.sh" "/usr/local/lib/service/telegram.lib.sh"
     fi
 
     systemctl daemon-reload

@@ -237,23 +237,26 @@ _node_exporter_start_on_fail() {
     fi
 }
 
+_rollback() {
+    if ! cp -p "${1}.bak.${TS}" "$1"; then
+        echo "Error: node exporter rollback failed" >&2
+    else
+        echo "Success: node exporter rolled back successfully"
+    fi
+    _node_exporter_start_on_fail
+}
+
 # install function for install bin and dat files
 _install() {
     local install_mode="$1"
     local install_src="$2"
     local install_dest="$3"
-    local name="$4"
 
         if install -m "$install_mode" -g root -o root "$install_src" "$install_dest"; then
-            echo "Success: $name installed"
+            echo "Success: node exporter installed"
         else
-            echo "Error: $name not installed, trying rollback" >&2
-            if ! cp -p "${install_dest}.bak.${TS}" "$install_dest"; then
-                echo "Error: $name rollback failed" >&2
-            else
-                echo "Success: $name rolled back successfully"
-            fi
-            _node_exporter_start_on_fail
+            echo "Error: node exporter not installed, trying rollback" >&2
+            _rollback "$install_dest"
             return 1
         fi
 }
@@ -316,17 +319,19 @@ install_node_exporter() {
 
     # install node_exporter bin
     if [ "$N_E_UP_TO_DATE" = "0" ]; then
-        _install "755" "$TMP_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter" "node_exporter binary" || return 1
+        _install "755" "$TMP_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter" || return 1
     else
-        echo "Info: node_exporter binary installation skipped"
+        echo "Info: node exporter installation skipped"
     fi
 
     # start node exporter
-    if systemctl start node_exporter.service > /dev/null 2>&1; then
-        echo "Success: node_exporter.service updated and started"
-    else
-        echo "Critical Error: node_exporter.service does not start" >&2
-        return 1
+    if [ "$N_E_UP_TO_DATE" = "0" ]; then
+        if systemctl start node_exporter.service > /dev/null 2>&1; then
+            echo "Success: node_exporter.service updated and started"
+        else
+            echo "Critical Error: node_exporter.service does not start" >&2
+            return 1
+        fi
     fi
 
     return 0

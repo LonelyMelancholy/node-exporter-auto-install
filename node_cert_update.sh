@@ -179,6 +179,9 @@ if [[ $REPLACE_ALL == 1 ]]; then
 
     # generation Certificate Autority public sert
     openssl req -x509 -new -nodes -key "${TMP_DIR}/ca.key" -sha256 -days 455 -out "${TMP_DIR}/ca.crt" -subj "/CN=metrics-mtls-ca"
+
+    install -m 640 -o root -g prometheus   "${TMP_DIR}/ca.crt"                  "/etc/prometheus/ca.crt"
+    install -m 600 -o root -g root         "${TMP_DIR}/ca.key"                  "/etc/prometheus/ca.key"
 fi
 
 if [[ $REPLACE_ALL == 1 || $REPLACE_PROMETHEUS == 1 ]]; then
@@ -196,13 +199,11 @@ extendedKeyUsage = clientAuth
 EOF
 
     # signature prometheus sertificate
-    openssl x509 -req -in "${TMP_DIR}/prometheus_client.crt" -CA "${TMP_DIR}/ca.crt" -CAkey "${TMP_DIR}/ca.key" -CAcreateserial \
+    openssl x509 -req -in "${TMP_DIR}/prometheus_client.crt" -CA "/etc/prometheus/ca.crt" -CAkey "/etc/prometheus/ca.key" -CAcreateserial \
         -out "${TMP_DIR}/prometheus_client.crt" -days 45 -sha256 -extfile "${TMP_DIR}/prometheus_client.ext" -extensions v3_req
 
     install -m 640 -o root -g prometheus   "${TMP_DIR}/prometheus_client.crt"   "/etc/prometheus/prometheus_client.crt"
     install -m 640 -o root -g prometheus   "${TMP_DIR}/prometheus_client.key"   "/etc/prometheus/prometheus_client.key"
-    install -m 640 -o root -g prometheus   "${TMP_DIR}/ca.crt"                  "/etc/prometheus/ca.crt"
-    install -m 600 -o root -g root         "${TMP_DIR}/ca.key"                  "/etc/prometheus/ca.key"
 
     GENERATED_CRT_TARGETS+=("prometheus_client")
 
