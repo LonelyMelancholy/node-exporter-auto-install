@@ -288,46 +288,48 @@ telegram_message "$MESSAGE"
 # download node exporter
 if ! download_and_verify "$NODE_EXPORTER_URL" "$TMP_DIR/node_exporter.tar.gz" "node_exporter"; then
     NODE_EXPORTER_DOWNLOAD=0
-    STATUS_NODE_EXPORTER_DOWNLOAD="❌ node exporter download failed"
+    STATUS_NODE_EXPORTER_DOWNLOAD="❌ <b>Error:</b> node exporter download"
 else
-    STATUS_NODE_EXPORTER_DOWNLOAD="☑️ node exporter download success"
+    STATUS_NODE_EXPORTER_DOWNLOAD="☑️ <b>Success:</b> node exporter download"
     NODE_EXPORTER_DOWNLOAD=1
 fi
 
 # install if download success
 if [[ "$NODE_EXPORTER_DOWNLOAD" == 1 ]]; then
     if ! install_node_exporter; then
-        STATUS_NODE_EXPORTER_INSTALL="❌ node exporter install failed"
+        STATUS_NODE_EXPORTER_INSTALL="❌ <b>Error:</b> node exporter install"
         NODE_EXPORTER_INSTALL=0
     else
         if [ "$N_E_UP_TO_DATE" = "1" ]; then
-            STATUS_NODE_EXPORTER_INSTALL="☑️ node exporter already up to date $N_E_OLD_VER"
+            STATUS_NODE_EXPORTER_INSTALL="☑️ <b>Success:</b> node exporter already updated $N_E_OLD_VER"
             NODE_EXPORTER_INSTALL=1
         else
-            STATUS_NODE_EXPORTER_INSTALL="☑️ node exporter updated from $N_E_OLD_VER to $N_E_NEW_VER"
+            STATUS_NODE_EXPORTER_INSTALL="☑️ <b>Success:</b> node exporter updated from $N_E_OLD_VER to $N_E_NEW_VER"
             NODE_EXPORTER_INSTALL=1
         fi
     fi
 else
     NODE_EXPORTER_INSTALL=0
-    STATUS_NODE_EXPORTER_INSTALL="⚠️ node exporter install skip"
+    STATUS_NODE_EXPORTER_INSTALL="⚠️ <b>Skip:</b> node exporter install"
 fi
 
 # check final node exporter status
 if systemctl is-active --quiet node_exporter.service; then
-    STATUS_NODE_EXPORTER_RUNNING="☑️ Success: node_exporter.service is running"
+    STATUS_NODE_EXPORTER_RUNNING="☑️ <b>Success:</b> node_exporter.service is running"
     NODE_EXPORTER_RUNNING=1
 else
-    STATUS_NODE_EXPORTER_RUNNING="❌ Error: node_exporter.service does not start"
+    STATUS_NODE_EXPORTER_RUNNING="❌ <b>Error:</b> node_exporter.service does not start"
     NODE_EXPORTER_RUNNING=0
 fi
 
 # select a title for the telegram message
 if [[ "$NODE_EXPORTER_INSTALL" == 1 && "$NODE_EXPORTER_RUNNING" == 1 ]]; then
-    MESSAGE_TITLE="<b>✅ Scheduled node exporter update</b>"
+    MESSAGE_TITLE="✅ <b>Scheduled node exporter update</b>"
+    STATUS_UPDATE="☑️ <b>Action:</b> update success"
     RC=0
 else
-    MESSAGE_TITLE="<b> ❌ Scheduled node exporter update</b>"
+    MESSAGE_TITLE="❌ <b>Scheduled node exporter update</b>"
+    STATUS_UPDATE="❌ <b>Action:</b> update failed"
 fi
 
 # collecting report for telegram message
@@ -335,6 +337,7 @@ MESSAGE="$MESSAGE_TITLE
 
 🖥️ <b>Host:</b> $(hostname)
 ⌚ <b>Time:</b> $(date '+%Y-%m-%d %H:%M:%S')
+${STATUS_UPDATE}
 ${STATUS_NODE_EXPORTER_DOWNLOAD}
 ${STATUS_NODE_EXPORTER_INSTALL}
 ${STATUS_NODE_EXPORTER_RUNNING}
@@ -349,7 +352,7 @@ telegram_message "$MESSAGE"
 
 # if update successuful, delete all old backups
 if [[ $RC == 0 ]]; then
-    run_and_check "delete all old '.bak' files" rm -f -- /usr/local/bin/*.bak.*
+    run_and_check "delete all old '.bak' files" rm -f -- /usr/local/bin/node_exporter.bak.*
 fi
 
 exit $RC
