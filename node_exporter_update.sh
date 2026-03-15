@@ -3,28 +3,23 @@
 # export path just in case
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
+
+# main variables
+LATEST_TAG=$(curl -Ls -o /dev/null -w '%{url_effective}' \
+    "https://github.com/prometheus/node_exporter/releases/latest" | awk -F'/tag/' '{print $2}')
+OS_ARCH="linux-amd64"
+NODE_EXPORTER_FILE="node_exporter-${LATEST_TAG#v}.${OS_ARCH}.tar.gz"
+SHA256SUM_FILE="sha256sums.txt"
+NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/latest/download/"
 TS=$(date '+%Y%m%d_%H%M%S')
-DATE_START=$(date '+%Y-%m-%d %H:%M:%S')
-FAIL_TD=0
 RC=1
+umask 022
 
 # enable logging
 exec > >(systemd-cat -t node_exporter_update -p info) 2> >(systemd-cat -t node_exporter_update -p err) 5> >(systemd-cat -t node_exporter_update -p notice)
 
 # start logging message
 echo "########## node exporter update started - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
-
-# root check
-[[ $EUID -ne 0 ]] && { echo "Error: you are not the root user, exit"; exit 1; }
-
-# check another instanse of the script is not running
-readonly LOCK_FILE="/run/lock/node_exporter_update.lock"
-exec {fd}> "$LOCK_FILE" || { echo "Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
-flock -n "$fd" || { echo "Error: another instance is running, exit"; exit 1; }
-
-# changing directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" || { echo "Error: couldn't change working directory, exit"; exit 1; }
 
 # exit logging message function
 # shellcheck disable=SC2329
@@ -40,7 +35,7 @@ end_log() {
 trap 'end_log;' EXIT
 
 # create working directory
-TMP_DIR="$(mktemp -d)" || { echo "❌ Error: failed to create temporary directory, exit"; exit 1; }
+TMP_DIR="$(mktemp -d)" || { echo "Error: failed to create temporary directory, exit"; exit 1; }
 readonly TMP_DIR
 
 # exit cleanup and log message function
@@ -59,20 +54,21 @@ exit_cleanup() {
 # set trap for exit cleanup
 trap 'end_log; exit_cleanup;' EXIT
 
+# root check
+[[ $EUID -ne 0 ]] && { echo "Error: you are not the root user, exit"; exit 1; }
+
+# check another instanse of the script is not running
+readonly LOCK_FILE="/run/lock/node_exporter_update.lock"
+exec {fd}> "$LOCK_FILE" || { echo "Error: cannot open lock file '$LOCK_FILE', exit"; exit 1; }
+flock -n "$fd" || { echo "Error: another instance is running, exit"; exit 1; }
+
+# changing directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || { echo "Error: couldn't change working directory, exit"; exit 1; }
+
 # source Telegram func library
 # shellcheck source=share/telegram.lib.sh
 source "/usr/local/lib/service/telegram.lib.sh" || { echo "Error: failed to source '/usr/local/lib/service/telegram.lib.sh', exit" >&2; exit 1; }
-
-# main variables
-LATEST_TAG=$(curl -Ls -o /dev/null -w '%{url_effective}' \
-    "https://github.com/prometheus/node_exporter/releases/latest" \
-    | awk -F'/tag/' '{print $2}')
-OS_ARCH="linux-amd64"
-NODE_EXPORTER_FILE="node_exporter-${LATEST_TAG#v}.${OS_ARCH}.tar.gz"
-SHA256SUM_FILE="sha256sums.txt"
-NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/latest/download/"
-MAX_ATTEMPTS=3
-umask 022
 
 # helper function
 # shellcheck disable=SC2329
@@ -80,45 +76,10 @@ run_and_check() {
     local action="$1"
     shift 1
     if "$@" > /dev/null; then
-        echo "✅ Success: $action"
+        echo "Success: $action"
     else
-        echo "❌ Error: $action, exit"
-        exit 1
-    fi
-}
-
-# cleanup old backup and log
-cleanup_old() {
-    local dir="$1"
-    local pattern="$2"
-    local keep="$3"
-    local name="$4"
-    local has_old=0
-    local f
-    local glob="${dir}/${pattern}"
-
-    if ! compgen -G "$glob" > /dev/null; then
-        STATUS_OLD_BACKUP_DEL+="☑️ old ${name} missing, skipping deletion"$'\n'
-        return
-    fi
-
-    for f in "$dir"/$pattern; do
-        [[ -n "$keep" && "$f" == "$keep" ]] && continue
-
-        has_old=1
-        echo "Info: deleting old ${name} $f"
-        if rm -f -- "$f"; then
-            echo "Success: old ${name} $f deleted"
-            STATUS_OLD_BACKUP_DEL+="☑️ old ${name} deletion success"$'\n'
-        else
-            echo "Error: failed to delete old ${name} $f" >&2
-            STATUS_OLD_BACKUP_DEL+="⚠️ old ${name} deletion failed"$'\n'
-            FAIL_TD=1
-        fi
-    done
-
-    if [[ $has_old == 0 ]]; then
-        STATUS_OLD_BACKUP_DEL+="☑️ old ${name} missing, skipping deletion"$'\n'
+        echo "Error: $action" 
+        return 1
     fi
 }
 
@@ -130,19 +91,20 @@ _dl_with_retry() {
     local outfile="$2"
     local label="$3"
     local attempt=1
+    local max_attempts=10
 
     while true; do
-        echo "📢 Info: download ${label}, attempt ${attempt}, please wait"
+        echo "Info: download ${label}, attempt ${attempt}, please wait"
         if ! _dl "$url" "$outfile"; then
-            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
-                echo "❌ Error: download ${label} after ${attempt} attempts, exit"
+            if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "Error: download ${label} after ${attempt} attempts" >&2
                 return 1
             fi
             sleep 60
             ((attempt++))
             continue
         else
-            echo "✅ Success: download ${label} after ${attempt} attempts"
+            echo "Success: download ${label} after ${attempt} attempts"
             return 0
         fi
     done
@@ -157,20 +119,20 @@ download_and_verify() {
     local expected_sha actual_sha
 
     # download main file
-    _dl_with_retry "${url}${NODE_EXPORTER_FILE}" "$outfile" "$name" || exit 1
+    _dl_with_retry "${url}${NODE_EXPORTER_FILE}" "$outfile" "$name" || return 1
 
     # download checksum
-    _dl_with_retry "${url}${SHA256SUM_FILE}" "$sha256sum_file" "${name}.sha256sum" || exit 1
+    _dl_with_retry "${url}${SHA256SUM_FILE}" "$sha256sum_file" "${name}.sha256sum" || return 1
 
     # reset sha
     expected_sha=""
     # extract sha256sum from sha256sum_file
     expected_sha="$(awk '/linux-amd64.tar.gz/ {print $1}' "$sha256sum_file")"
     if [ -z "$expected_sha" ]; then
-        echo "❌ Error: parse SHA256 from ${sha256sum_file}, exit"
-        exit 1
+        echo "Error: parse SHA256 from ${sha256sum_file}" >&2
+        return 1
     else
-        echo "✅ Success: parse SHA256 from ${sha256sum_file}"
+        echo "Success: parse SHA256 from ${sha256sum_file}"
     fi
 
     # extract actual sha256sum from .zip or .dat
@@ -178,72 +140,49 @@ download_and_verify() {
     actual_sha=""
     actual_sha="$(sha256sum "$outfile" 2>/dev/null | awk '{print $1}')"
     if [ -z "$actual_sha" ]; then
-        echo "❌ Error: extract SHA256 from ${outfile}, exit"
-        exit 1
+        echo "Error: extract SHA256 from ${outfile}" >&2
+        return 1
     else
-        echo "✅ Success: extraction SHA256 from ${outfile}"
+        echo "Success: extraction SHA256 from ${outfile}"
     fi
 
     # compare sha256sum checksum
     if [ "$expected_sha" != "$actual_sha" ]; then
         echo "📢 Info: expected SHA256 from '.sha256sum': $expected_sha"
         echo "📢 Info: actual SHA256 from '.tar.gz': $actual_sha"
-        echo "❌ Error: compare, actual and expected SHA256 do not match for ${name}, exit"
-        exit 1
+        echo "Error: compare, actual and expected SHA256 do not match for ${name}" >&2
+        return 1
     else
         echo "📢 Info: expected SHA256 from '.sha256sum': $expected_sha"
         echo "📢 Info: actual SHA256 from '.tar.gz': $actual_sha"
-        echo "✅ Success: actual and expected SHA256 match for ${name}"
+        echo "Success: actual and expected SHA256 match for ${name}"
     fi
 
     # unpack archive
     if ! tar -xzf "$outfile" -C "$TMP_DIR" &> /dev/null; then
-        echo "❌ Error: extract ${outfile}, exit"
-        exit 1
+        echo "Error: extract ${outfile}" >&2
+        return 1
     else
-        echo "✅ Success: ${outfile} successfully extracted"
+        echo "Success: ${outfile} successfully extracted"
     fi
     # check node exporter binary
-    if [ ! -f "$TMP_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" ]; then
-        echo "❌ Error: node exporter binary is missing from folder after unpacking ${outfile}, exit"
-        exit 1
+    if [ ! -f "$TMP_DIR/node_exporter" ]; then
+        echo "Error: node exporter binary is missing from folder after unpacking ${outfile}" >&2
+        return 1
     else
-        echo "✅ Success: node exporter binary exists in the folder after unpacking ${outfile}"
+        echo "Success: node exporter binary exists in the folder after unpacking ${outfile}"
     fi
 
     return 0
 }
 
-
-# backup function
-_backup_old_file() {
-    local backup_src="$1"
-    local backup_dest="$2"
-    local label="$3"
-    if cp -p "$backup_src" "$backup_dest"; then
-        echo "Success: ${label} backup completed"
-    else
-        echo "Error: ${label} backup failed, exit" >&2
-        return 1
-    fi
-}
-
 # function for start node_exporter.service and check status
 _node_exporter_start_on_fail() {
     if systemctl start node_exporter.service &> /dev/null; then
-        echo "Success: node_exporter.service started, try updating again later, exit"
+        echo "Success: node_exporter.service started, try updating again later"
     else
-        echo "Critical Error: node_exporter.service does not start, exit" >&2
+        echo "Error: node_exporter.service does not start" >&2
     fi
-}
-
-_rollback() {
-    if ! cp -p "${1}.bak.${TS}" "$1"; then
-        echo "Error: node exporter rollback failed" >&2
-    else
-        echo "Success: node exporter rolled back successfully"
-    fi
-    _node_exporter_start_on_fail
 }
 
 # install function for install bin and dat files
@@ -252,13 +191,14 @@ _install() {
     local install_src="$2"
     local install_dest="$3"
 
-        if install -m "$install_mode" -g root -o root "$install_src" "$install_dest"; then
-            echo "Success: node exporter installed"
-        else
-            echo "Error: node exporter not installed, trying rollback" >&2
-            _rollback "$install_dest"
-            return 1
-        fi
+    if install -m "$install_mode" -g root -o root "$install_src" "$install_dest"; then
+        echo "Success: node exporter installed"
+    else
+        echo "Error: node exporter not installed, trying rollback" >&2
+        run_and_check "rollback node exporter" cp -p "${install_dest}.bak.${TS}" "$install_dest"
+        _node_exporter_start_on_fail
+        return 1
+    fi
 }
 
 # install node_exporter files function
@@ -268,10 +208,10 @@ install_node_exporter() {
     N_E_OLD_VER=""
 
     # check node exporter version
-    if [ -x "$TMP_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" ]; then
-        N_E_NEW_VER="$("$TMP_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" --version | awk 'NR==1 {print $3; exit}')"
+    if [ -x "$TMP_DIR/node_exporter" ]; then
+        N_E_NEW_VER="$("$TMP_DIR/node_exporter" --version | awk 'NR==1 {print $3; exit}')"
     else
-        echo "Error: unknown new node_exporter version, exit" >&2
+        echo "Error: unknown new node exporter version" >&2
         return 1
     fi
 
@@ -279,27 +219,20 @@ install_node_exporter() {
         N_E_OLD_VER="$(node_exporter --version | awk 'NR==1 {print $3; exit}')"
     else
         N_E_OLD_VER=""
-        echo "Error: unknown old node_exporter version, exit" >&2
+        echo "Error: unknown old node exporter version" >&2
         return 1
     fi
 
     if [ -n "$N_E_NEW_VER" ] && [ -n "$N_E_OLD_VER" ] && [ "$N_E_NEW_VER" == "$N_E_OLD_VER" ]; then
-        echo "Info: node_exporter already up to date $N_E_NEW_VER, skip update"
+        echo "Info: node exporter already up to date $N_E_NEW_VER, skip update"
         N_E_UP_TO_DATE=1
     else
-        echo "Info: current node_exporter version is $N_E_OLD_VER, latest is $N_E_NEW_VER, preparing to update"
+        echo "Info: current node exporter version is $N_E_OLD_VER, latest is $N_E_NEW_VER, preparing to update"
         N_E_UP_TO_DATE=0
+        run_and_check "backup node exporter" cp -p "/usr/local/bin/node_exporter" "/usr/local/bin/node_exporter.bak.${TS}" || return 1
     fi
 
-    # old file backup
-    if [ "$N_E_UP_TO_DATE" = "0" ]; then
-        # backup
-        _backup_old_file "/usr/local/bin/node_exporter" "/usr/local/bin/node_exporter.bak.${TS}" "node_exporter bin" || return 1
-    else
-        echo "Info: node_exporter already up to date, backup not needed"
-    fi
-
-    # stop node_exporter service for update
+    # stop node exporter service for update
     if [[ "$N_E_UP_TO_DATE" == 0 ]]; then
         if systemctl stop node_exporter.service &> /dev/null; then
             echo "Success: node_exporter.service stopped, starting the update"
@@ -307,7 +240,7 @@ install_node_exporter() {
             echo "Error: failed to stop node_exporter.service, cancelling update" >&2
             echo "Info: checking status node_exporter.service"
             if systemctl is-active --quiet node_exporter.service; then
-                echo "Success: node_exporter.service is running, try updating again later, exit"
+                echo "Success: node_exporter.service is running, try updating again later"
                 return 1
             else
                 echo "Error: node_exporter.service is not running, trying to start" >&2
@@ -319,7 +252,7 @@ install_node_exporter() {
 
     # install node_exporter bin
     if [ "$N_E_UP_TO_DATE" = "0" ]; then
-        _install "755" "$TMP_DIR/node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter" || return 1
+        _install "755" "$TMP_DIR/node_exporter" "/usr/local/bin/node_exporter" || return 1
     else
         echo "Info: node exporter installation skipped"
     fi
@@ -329,7 +262,7 @@ install_node_exporter() {
         if systemctl start node_exporter.service > /dev/null 2>&1; then
             echo "Success: node_exporter.service updated and started"
         else
-            echo "Critical Error: node_exporter.service does not start" >&2
+            echo "Error: node_exporter.service does not start" >&2
             return 1
         fi
     fi
@@ -337,67 +270,86 @@ install_node_exporter() {
     return 0
 }
 
-cleanup_old "/usr/local/bin" "node_exporter.bak.*" "/usr/local/bin/node_exporter.bak.${TS}" "node exporter backup"
+# main logic start here
+# send start update message
+MESSAGE="⚠️ <b>Scheduled node exporter update</b>
 
-# update node exporter
+🖥️ <b>Host:</b> $(hostname)
+⌚ <b>Time:</b> $(date '+%Y-%m-%d %H:%M:%S')
+☑️ <b>Action:</b> update started"
+
+# logging message
+echo "collected message - $(date '+%Y-%m-%d %H:%M:%S')"
+echo "$MESSAGE"
+
+# sending message
+telegram_message "$MESSAGE"
+
+# download node exporter
 if ! download_and_verify "$NODE_EXPORTER_URL" "$TMP_DIR/node_exporter.tar.gz" "node_exporter"; then
     NODE_EXPORTER_DOWNLOAD=0
-    STATUS_NODE_EXPORTER_MESSAGE="❌ node exporter download failed"
+    STATUS_NODE_EXPORTER_DOWNLOAD="❌ node exporter download failed"
 else
-    STATUS_NODE_EXPORTER_MESSAGE="☑️ node exporter download success"
+    STATUS_NODE_EXPORTER_DOWNLOAD="☑️ node exporter download success"
     NODE_EXPORTER_DOWNLOAD=1
 fi
 
-if [ "$NODE_EXPORTER_DOWNLOAD" = "1" ]; then
+# install if download success
+if [[ "$NODE_EXPORTER_DOWNLOAD" == 1 ]]; then
     if ! install_node_exporter; then
-        STATUS_INSTALL_MESSAGE="❌ node exporter install failed"
+        STATUS_NODE_EXPORTER_INSTALL="❌ node exporter install failed"
         NODE_EXPORTER_INSTALL=0
     else
         if [ "$N_E_UP_TO_DATE" = "1" ]; then
-            STATUS_INSTALL_MESSAGE+="☑️ node exporter already up to date $N_E_OLD_VER"
+            STATUS_NODE_EXPORTER_INSTALL="☑️ node exporter already up to date $N_E_OLD_VER"
             NODE_EXPORTER_INSTALL=1
         else
-            STATUS_INSTALL_MESSAGE+="☑️ node exporter updated from $N_E_OLD_VER to $N_E_NEW_VER"
+            STATUS_NODE_EXPORTER_INSTALL="☑️ node exporter updated from $N_E_OLD_VER to $N_E_NEW_VER"
             NODE_EXPORTER_INSTALL=1
         fi
     fi
 else
     NODE_EXPORTER_INSTALL=0
-    STATUS_INSTALL_MESSAGE="⚠️ node exporter install skip"
+    STATUS_NODE_EXPORTER_INSTALL="⚠️ node exporter install skip"
 fi
 
 # check final node exporter status
 if systemctl is-active --quiet node_exporter.service; then
-    STATUS_NODE_EXPORTER="☑️ Success: node_exporter.service is running"
+    STATUS_NODE_EXPORTER_RUNNING="☑️ Success: node_exporter.service is running"
+    NODE_EXPORTER_RUNNING=1
 else
-    STATUS_NODE_EXPORTER="❌ Critical Error: node_exporter.service does not start"
+    STATUS_NODE_EXPORTER_RUNNING="❌ Error: node_exporter.service does not start"
+    NODE_EXPORTER_RUNNING=0
 fi
 
 # select a title for the telegram message
-if [ "$NODE_EXPORTER_DOWNLOAD" = "1" ] && [ "$NODE_EXPORTER_INSTALL" = "1" ]; then
-    if [ "$FAIL_TD" = "0" ]; then
-        MESSAGE_TITLE="<b>✅ Scheduled node exporter update</b>"
-        RC=0
-    else
-        MESSAGE_TITLE="<b>⚠️ Scheduled node exporter update</b>"
-        RC=0
-    fi
+if [[ "$NODE_EXPORTER_INSTALL" == 1 && "$NODE_EXPORTER_RUNNING" == 1 ]]; then
+    MESSAGE_TITLE="<b>✅ Scheduled node exporter update</b>"
+    RC=0
 else
-    MESSAGE_TITLE="<b>❌ Scheduled node exporter update</b>"
-    RC=1
+    MESSAGE_TITLE="<b> ❌ Scheduled node exporter update</b>"
 fi
 
 # collecting report for telegram message
 MESSAGE="$MESSAGE_TITLE
 
 🖥️ <b>Host:</b> $(hostname)
-⌚ <b>Time start:</b> $DATE_START
-⌚ <b>Time end:</b> $(date '+%Y-%m-%d %H:%M:%S')
-${STATUS_OLD_BACKUP_DEL}${STATUS_NODE_EXPORTER_MESSAGE}
-${STATUS_INSTALL_MESSAGE}
-${STATUS_NODE_EXPORTER}
+⌚ <b>Time:</b> $(date '+%Y-%m-%d %H:%M:%S')
+${STATUS_NODE_EXPORTER_DOWNLOAD}
+${STATUS_NODE_EXPORTER_INSTALL}
+${STATUS_NODE_EXPORTER_RUNNING}
 💾 <b>Update log:</b> journalctl -t node_exporter_update"
 
-telegram_message
+# logging message
+echo "collected message - $(date '+%Y-%m-%d %H:%M:%S')"
+echo "$MESSAGE"
+
+# send result message
+telegram_message "$MESSAGE"
+
+# if update successuful, delete all old backups
+if [[ $RC == 0 ]]; then
+    run_and_check "delete all old '.bak' files" rm -f -- /usr/local/bin/*.bak.*
+fi
 
 exit $RC

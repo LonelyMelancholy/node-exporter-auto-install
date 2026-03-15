@@ -25,16 +25,15 @@ OS_ARCH="linux-amd64"
 NODE_EXPORTER_FILE="node_exporter-${LATEST_TAG#v}.${OS_ARCH}.tar.gz"
 SHA256SUM_FILE="sha256sums.txt"
 NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/latest/download/"
-MAX_ATTEMPTS=3
 umask 022
 
 # exit cleanup and log message function
 # shellcheck disable=SC2329
 exit_cleanup() {
-    if rm -rf "$SCRIPT_DIR"; then
-        echo "Success: delete tmp files"
+    if rm -rf "$SCRIPT_DIR" > /dev/null; then
+        echo "✅ Success: delete tmp files"
     else
-        echo "Error: delete tmp files"
+        echo "❌ Error: delete tmp files"
     fi
 }
 
@@ -53,7 +52,7 @@ run_and_check() {
     fi
 }
 
-# create user with check existense
+# create user with check existense function
 node_exporter_user_add() { useradd -r -M -d /nonexistent -s /usr/sbin/nologin node_exporter || return 1; }
 if ! getent passwd node_exporter &> /dev/null; then
     run_and_check "adding node_exporter user" node_exporter_user_add
@@ -64,16 +63,18 @@ fi
 # download function
 _dl() { curl -fsSL -m 60 "$1" -o "$2"; }
 
+# download and retry
 _dl_with_retry() {
     local url="$1"
     local outfile="$2"
     local label="$3"
     local attempt=1
+    local max_attempts=3
 
     while true; do
         echo "📢 Info: download ${label}, attempt ${attempt}, please wait"
         if ! _dl "$url" "$outfile"; then
-            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+            if [ "$attempt" -ge "$max_attempts" ]; then
                 echo "❌ Error: download ${label} after ${attempt} attempts, exit"
                 return 1
             fi
@@ -143,7 +144,7 @@ download_and_verify() {
         echo "✅ Success: ${outfile} successfully extracted"
     fi
     # check node exporter binary
-    if [ ! -f "node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" ]; then
+    if [ ! -f "node_exporter" ]; then
         echo "❌ Error: node exporter binary is missing from folder after unpacking ${outfile}, exit"
         exit 1
     else
@@ -164,7 +165,7 @@ mkdir -p /usr/local/etc/node_exporter/tls
 install -m 640 -o root -g node_exporter "ca.crt" "/usr/local/etc/node_exporter/tls/ca.crt"
 install -m 640 -o root -g node_exporter "${NODE}.crt" "/usr/local/etc/node_exporter/tls/${NODE}.crt"
 install -m 640 -o root -g node_exporter "${NODE}.key" "/usr/local/etc/node_exporter/tls/${NODE}.key"
-install -m 755 -o root -g root "node_exporter-${LATEST_TAG#v}.${OS_ARCH}/node_exporter" "/usr/local/bin/node_exporter"
+install -m 755 -o root -g root "node_exporter" "/usr/local/bin/node_exporter"
 install -m 755 -o root -g root "node_exporter_update.sh" "/usr/local/bin/service/node_exporter_update.sh"
 
 # create user with check existense

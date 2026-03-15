@@ -4,6 +4,20 @@
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
+# main variables
+RC=1
+SERVER_LIST_FILE="/usr/local/etc/node_cert_update/node_list.cfg"
+THRESHOLD_DAYS=15
+THRESHOLD_DAYS_ROOT=90
+ALL_TARGETS=()
+MISSED_CERT_TARGETS=()
+EXPIRED_TARGETS=()
+NEED_TO_GENERATE_TARGETS=()
+SSH_KEY_NOT_FOUND_TARGETS=()
+SSH_CONNECT_FAILED_TARGETS=()
+CERT_CHECK_ERROR_TARGETS=()
+GENERATED_CRT_TARGETS=()
+
 # enable logging
 exec > >(systemd-cat -t node_cert_update -p info) 2> >(systemd-cat -t node_cert_update -p err) 5> >(systemd-cat -t node_cert_update -p notice)
 
@@ -18,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || { echo "Error: couldn't change working directory, exit" >&2; exit 1; }
 
 # exit logging message function
-RC="1"
+# shellcheck disable=SC2329
 end_log() {
     if [[ "$RC" -eq "0" ]]; then
         echo "########## node certificate update ended - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
@@ -58,18 +72,6 @@ flock -n "$fd" || { echo "Error: another instance is running, exit" >&2; exit 1;
 # source Telegram func library
 # shellcheck source=share/telegram.lib.sh
 source "/usr/local/lib/service/telegram.lib.sh" || { echo "Error: failed to source '/usr/local/lib/service/telegram.lib.sh', exit" >&2; exit 1; }
-
-SERVER_LIST_FILE="/usr/local/etc/node_cert_update/node_list.cfg"
-THRESHOLD_DAYS=15
-THRESHOLD_DAYS_ROOT=90
-ALL_TARGETS=()
-MISSED_CERT_TARGETS=()
-EXPIRED_TARGETS=()
-NEED_TO_GENERATE_TARGETS=()
-SSH_KEY_NOT_FOUND_TARGETS=()
-SSH_CONNECT_FAILED_TARGETS=()
-CERT_CHECK_ERROR_TARGETS=()
-GENERATED_CRT_TARGETS=()
 
 [[ ! -f "$SERVER_LIST_FILE" ]] && { echo "Error: check '$SERVER_LIST_FILE' missing or not a file, exit" >&2; exit 1; }
 [[ ! -r "$SERVER_LIST_FILE" ]] && { echo "Error: check '$SERVER_LIST_FILE' missing or you do not have read permissions, exit" >&2; exit 1; }
@@ -322,6 +324,7 @@ else
     exit 0
 fi
 
+# collect title for Telegram message
 if [[ ${#SSH_KEY_NOT_FOUND_TARGETS[@]} -gt 0 || ${#SSH_CONNECT_FAILED_TARGETS[@]} -gt 0 || ${#CERT_CHECK_ERROR_TARGETS[@]} -gt 0 ]]; then
     TITLE="❌ <b>Scheduled sertificate update</b>"
 else
@@ -329,6 +332,7 @@ else
     RC=0
 fi
 
+# collect body for Telegram message
 MESSAGE="$TITLE
 🖥️ <b>Host:</b> $(hostname)
 ⌚ <b>Time:</b> $(date '+%Y-%m-%d %H:%M:%S')
@@ -346,7 +350,12 @@ $(printf '❌ %s\n' "${SSH_CONNECT_FAILED_TARGETS[@]}")
 $(printf '❌ %s\n' "${CERT_CHECK_ERROR_TARGETS[@]}")
 💾 <b>Update log:</b> journalctl -t node_cert_update"
 
+# logging message
 echo "########## collected message - $(date '+%Y-%m-%d %H:%M:%S') ##########" >&5
 echo "$MESSAGE"
 
-telegram_message
+# send message
+telegram_message "$MESSAGE"
+
+# exit with work success code
+exit $RC

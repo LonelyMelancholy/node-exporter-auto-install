@@ -5,10 +5,10 @@
 # |    if we have already installed full version, not install this version    |
 # warning ------------------------------------------------------------- warning
 #
-# telegram sender message, if call telegram_message function, function send text in $MESSAGE variable
+# telegram sender message, function send text, use telegram_message "text"
 # if sending failed, RC_M not changed, if sending success RC_M=0
 # RC_M - message sender return code
-# external variable - $MESSAGE, $RC_M
+# external variable - $RC_M
 # external file /usr/local/etc/telegram/secrets.env [root:telegram_gateway 640] with $BOT_TOKEN and $GROUP_ID
 
 # check secret file, if the file have right permissions, we source it.
@@ -28,27 +28,29 @@ source "$ENV_FILE" || { echo "Error: failed to source '$ENV_FILE', exit" >&2; ex
 
 # pure Telegram message function with checking the sending status
 _tg_m() {
+    local text="$1"
     local response
     response="$(curl -fsS -m 10 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${GROUP_ID}" \
         --data-urlencode "parse_mode=HTML" \
-        --data-urlencode "text=${MESSAGE}")" || return 1
+        --data-urlencode "text=${text}")" || return 1
     grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' <<< "$response" || return 1
     return 0
 }
 
 # Telegram message with final result logging and retry on failure
 telegram_message() {
+    local text="$1"
     local attempt=1
-    local max_attempt=3
+    local max_attempts=10
     local wait_sec=60
     while true; do
-        if ! _tg_m; then
-            if [[ "$attempt" -ge "$max_attempt" ]]; then
+        if ! _tg_m "$text" ; then
+            if [[ "$attempt" -ge "$max_attempts" ]]; then
                 echo "Error: failed to send Telegram message after $attempt attempts, exit" >&2
-                exit 1
+                return 1
             fi
-            echo "Info: failed to send Telegram message. Waiting ${wait_sec}s... attempt ${attempt}/${max_attempt}"
+            echo "Info: failed to send Telegram message. Waiting ${wait_sec}s... attempt ${attempt}/${max_attempts}"
             sleep $wait_sec
             ((attempt++))
             continue
